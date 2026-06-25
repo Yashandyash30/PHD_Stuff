@@ -1,0 +1,337 @@
+Fire up your Arch terminal. DAOPHOT II is an old-school beast, but for isolating a fading GRB optical counterpart or a supernova from a messy host galaxy, its iterative profile-fitting is exactly what you need.
+
+Based on your terminal screenshot, your parameters are successfully loaded (using that Penny function with 5 free parameters for the PSF is a solid choice for complex profiles). Here is the exact, step-by-step CLI workflow to get you through the actual photometry and point-spread function (PSF) generation.
+
+Whenever you see `<CR>`, it means simply hit **Enter** to accept the default file name the program offers. This is highly recommended to keep your file extensions cleanly synced.
+
+### Phase 1: Detection & Aperture Photometry
+
+This executes the initial finding and basic photometry based on the `daophot.opt` and `photo.opt` parameters you've already configured.
+
+1. Attach your FITS file
+
+```text
+Command: AT
+Enter file name: your_image.fits
+
+```
+
+2. Find the sources
+
+```text
+Command: FI
+Number of frames averaged, summed: 1,1
+File for the positions (default ?.COO): <CR>
+
+```
+
+(Note: Enter `1,1` if this is a single exposure. The terminal will spit out the detection threshold. If it asks "Are you happy with this?", type `Y`.)
+
+3. Run Aperture Photometry
+
+```text
+Command: PH
+Enter table name (default PHOTO.OPT): <CR>
+File with the positions (default ?.COO): <CR>
+File for the magnitudes (default ?.AP): <CR>
+
+```
+
+*This calculates rough sky backgrounds and magnitudes for everything it just found, saving it to a `.ap` file.*
+
+---
+
+### Phase 2: Building the Point-Spread Function (PSF)
+
+This is the critical step. You need isolated, bright (but unsaturated) stars to build a mathematical model of how light spreads in your specific image.
+
+4. Pick Candidate PSF Stars
+
+```text
+Command: PI
+Input file name (default ?.AP): <CR>
+Desired number of stars, faintest magnitude: 25, 99
+Output file name (default ?.LST): <CR>
+
+```
+
+(DAOPHOT will find 25 good candidates and reject ones too close to the edge or too close to brighter stars. Entering `99` just tells it to use whatever magnitude is necessary to get your 25 stars.)
+
+5. Generate the PSF Model
+
+```text
+Command: PS
+File with aperture results (default ?.AP): <CR>
+File with PSF stars (default ?.LST): <CR>
+File for the PSF (default ?.PSF): <CR>
+
+```
+
+Because your `WATCH PROGRESS` is set to `1.00`, the terminal will now draw ASCII-art representations of each candidate star.
+
+* For each star, it will ask if you want to include it.
+* Look at the ASCII plot: if it looks like a clean, single star, type `Y`. If it looks like a cosmic ray, a doublet, or a smudge, type `N`.
+
+
+
+---
+
+### Phase 3: Profile-Fitting Photometry (ALLSTAR)
+
+While DAOPHOT has internal commands (`NSTAR`, `PEAK`), the manual strongly recommends using the standalone program **ALLSTAR** for the final rigorous simultaneous least-squares fit.
+
+6. Exit DAOPHOT
+
+```text
+Command: EX
+
+```
+
+**7. Run ALLSTAR**
+Back in your standard Linux shell, launch ALLSTAR (it will read your `.opt` files just like DAOPHOT did):
+
+```bash
+allstar
+
+```
+
+```text
+Input image name: your_image.fits
+File with the PSF (default ?.PSF): <CR>
+Input file (default ?.AP): <CR>
+File for results (default ?.ALS): <CR>
+Name for subtracted image (default ?s.fits): <CR>
+
+```
+
+### The Output
+
+ALLSTAR will crunch the matrix and give you two highly useful files:
+
+1.
+**The `.als` file:** This contains your final, precise profile-fitted magnitudes and coordinates.
+
+
+2.
+**The `?s.fits` (Subtracted Image):** This is your original image with all the known stars digitally erased using the PSF model.
+
+
+
+**Pro-Tip for Crowded Fields:** Open that subtracted FITS file in a viewer (like ds9). If you see faint stars left behind that the initial `FIND` missed because they were hiding in the glare of brighter objects, you can run DAOPHOT again, `ATTACH` the subtracted image, run `FIND` to grab their coordinates, and feed them back through the loop.
+
+Deciding which stars make the cut for your Point-Spread Function (PSF) is the most subjective and crucial part of this entire pipeline. When you're trying to perform precision photometry on a fading GRB counterpart or isolate a supernova from a messy host galaxy, a flawed PSF model will leave nasty subtraction residuals that can completely skew your measurements.
+
+DAOPHOT is showing you a 2D topographical ASCII map of the star's light profile. Here is exactly what you should be looking for when deciding to hit `y` (Yes) or `n` (No).
+
+### The "Yes" Criteria (What makes a good PSF star)
+
+* **The Bullseye Symmetry:** The core should be dead center, surrounded by smooth, concentric layers of characters (like the transition from `%` to `0` to `H` in your screenshot). The profile you are looking at right now is a textbook example of a beautifully symmetric star.
+* **A Single, Distinct Core:** You want one undeniable peak of brightness in the center.
+* **Smooth Gradient:** The light should fall off evenly in all directions into the sky background (`-` characters).
+
+### The "No" Criteria (When to reject)
+
+* **Double Cores:** If the center looks stretched out into an oval or has two distinct peaks, it's a tight binary or a blended source. Reject it.
+* **Asymmetric Lumps:** If there is a sudden bulge of high-intensity characters off to one side, the star is contaminated by a fainter neighbor, a background galaxy, or a cosmic ray. Reject it.
+* **Sharp Spikes:** If the profile is mostly low-intensity but has one or two jagged, off-center bright pixels, it's likely a cosmic ray hit.
+
+---
+
+### The Catch in Your Screenshot: The Saturation Limit
+
+Take a close look at the bottom line: **`Brightest pixel: 59859`**.
+
+Recall that your `HIGH GOOD DATUM` (saturation limit) was set to `60000.00`. This star is riding the absolute bleeding edge of your detector's non-linear regime.
+
+DAOPHOT will automatically refuse to use a star if it detects a bad pixel (above the `HIGH GOOD DATUM`) inside one fitting radius of the star's centroid. Because 59859 is technically just below your 60000 threshold, DAOPHOT passed it to you for a final decision.
+
+**The Verdict for this star:** I would type **`y`**. The profile is incredibly clean and symmetric, making it a powerful anchor for your analytic model. However, because its core is so close to saturation, you will want to pay close attention to the subtraction residual it leaves behind later.
+
+Are you planning to run multiple iterations of this PSF-fitting and subtraction loop to dig out fainter sources in a crowded field, or is your target region relatively sparse?
+I would definitely hit **`n`** (No) on this one.
+
+Here is the breakdown of why this candidate should be rejected:
+
+* **The Main Issue (Asymmetry/Contamination):** Take a look at the upper-left quadrant of the plot. There is a distinct, detached blob of `-` characters floating away from the main concentric rings. There is also a tiny speck of noise down in the bottom-left corner. This indicates that a faint neighboring star, a background galaxy, or a cluster of hot pixels is encroaching on your star's profile.
+* **The Consequence:** If you accept this star, DAOPHOT will average that top-left blob into your master Point-Spread Function. Your model will essentially "learn" that every star in your telescope's image has a faint little bump on its top-left side. When the software later subtracts this flawed PSF from the rest of the image, it will over-subtract that area, leaving behind negative "divots" (or "zits" ) next to every single star.
+
+
+* **The Bright Side:** The peak intensity (`Brightest pixel: 46643`) is excellent and safely below your 60,000 saturation limit, and the very center of the core (`####`) isn't terrible.
+
+**The Verdict:** Toss it. When building an initial PSF, you want the stars to be as isolated as possible. Because you are hunting for 25 solid candidates, you have the luxury of being absolutely ruthless. Hold out for those perfect, symmetric bullseyes!
+
+Type **`n`** (No).
+
+You should definitely reject this candidate. Here is what is happening under the hood and why this star is a trap:
+
+### What the Error Means
+
+DAOPHOT is alerting you that it found pixels in this star's neighborhood that violate your "Good Data" limits. Specifically, these pixels fall outside your core `FITTING RADIUS` but inside the outer `PSF RADIUS` boundary.
+
+Because these defective pixels aren't dead-center in the star's core, DAOPHOT is giving you the final say on whether to risk including it.
+
+### Why You Must Reject It
+
+*
+**The sheer volume of errors:** If this were just one or two stray cosmic rays, you could hit `y` and rely on DAOPHOT's internal cleaning passes to downweight the bad pixels. But look at that list—there are *dozens* of flagged pixels spanning a massive 30x30 coordinate grid (from X:1967–1998 and Y:1832–1863).
+
+
+* **The ADU Values:** The flagged pixel values are hovering around `1040` to `1075`. Since your `HIGH GOOD DATUM` is `60000`, these clearly aren't saturated. Instead, they are falling below your `LOW GOOD DATUM` threshold. This usually means the star is sitting on a dead region of the CCD, right on the detector's edge, or in a deep negative trough caused by a previous bad image subtraction.
+*
+**The Consequence:** If you force the software to use this star, the bad-pixel rejection algorithm will be completely overwhelmed. It will drag the quality of your master PSF down, which will subsequently ruin the photometry for your GRB counterpart.
+
+
+
+**The Verdict:**
+Toss it. You pulled 25 candidates, so you can easily afford to lose the defective ones.
+
+*(Note: If DAOPHOT starts throwing this exact wall of errors for **every single star** in your list, it means your `LOW GOOD DATUM` parameter in your `daophot.opt` file is set too aggressively for the sky background of this specific FITS file, and you'll need to lower it.)*
+
+You have successfully built your Point-Spread Function! A `Chi` of **0.0199** means your analytic model matches the real stars to within ~2% on average. That is a fantastic, tight fit.
+
+However, DAOPHOT is throwing a red flag that you need to address before moving forward.
+
+### The Warning: Saturated Stars
+
+Notice that stars **922** and **77** are flagged as `saturated` in the profile errors list. Even though 922 looked okay initially (peaking at 59859), during the actual matrix math, DAOPHOT determined it crossed the non-linear threshold. Including saturated stars will warp the core of your master PSF, which will leave ugly donut-hole residuals when you subtract it later.
+
+You have a fork in the road here. You can either refine this PSF to make it perfect, or push forward to final photometry if you just want to see quick results.
+
+---
+
+### Option 1: The Perfectionist Route (Highly Recommended)
+
+Since you are hunting for a GRB counterpart, you want your subtraction to be as clean as possible. You should prune those two bad apples from your list.
+
+**1. Exit DAOPHOT:**
+
+```text
+Command: EX
+
+```
+
+**2. Edit your star list:**
+Open the list file in your favorite terminal text editor (Nano, Vim, etc.):
+
+```bash
+nano aaGRB_I_0.lst
+
+```
+
+Simply delete the rows for stars **922** and **77**, save, and exit.
+
+**3. Rerun the PSF routine:**
+Fire DAOPHOT back up, `AT` your FITS file, and run `PS` exactly as you did before. It will read the updated `.lst` file and generate a perfectly clean `.psf` model.
+
+---
+
+### Option 2: The "Let's See the Results" Route
+
+If you want to just push forward and see how well this current PSF models your entire image, it is time to move to the final profile-fitting stage using the standalone `ALLSTAR` program.
+
+*(Note: The `.nei` file DAOPHOT just mentioned is used for a highly advanced technique where you iteratively subtract neighbors to clean the PSF, but for a first pass, we will apply the PSF to the entire image).*
+
+**1. Exit DAOPHOT:**
+
+```text
+Command: EX
+
+```
+
+**2. Run ALLSTAR:**
+Launch ALLSTAR from your terminal. It will use your `.psf` model to simultaneously fit every star found in your `.ap` file.
+
+```bash
+allstar
+
+```
+
+**3. Feed it the files:**
+
+```text
+Input image name: aaGRB_I_0.fits
+File with the PSF (default ?.PSF): <CR>
+Input file (default ?.AP): <CR>
+File for results (default ?.ALS): <CR>
+Name for subtracted image (default ?s.fits): aaGRB_I_0_sub.fits
+
+```
+
+Once ALLSTAR finishes crunching the matrix, open that new `aaGRB_I_0_sub.fits` file in your image viewer. All the stars should be completely digitally erased. If your GRB is hiding near a bright star or a host galaxy, this subtracted image is where it will magically pop out.
+
+Congratulations on making it through the pipeline! The `.als` file (ALLSTAR output) you just generated is the ultimate prize—it contains the final, mathematically rigorous profile-fitted photometry for every star that survived the process.
+
+While I can't read the raw bytes of the specific file you just attached, I can tell you exactly how to read it. Despite the `.als` extension, it is just a standard ASCII text file. You can crack it open in your Arch terminal right now using `less aaGRB_I_0.als`, `cat`, or `nano`.
+
+Here is the exact breakdown of how the output is structured and how to use it to hunt down your Gamma-Ray Burst (GRB) counterpart.
+
+### 1. The Header
+
+The first three lines of the file are a header carrying over your parameters from DAOPHOT. It includes your image dimensions (`NX`, `NY`), your good data limits (`LOWBAD`, `HIGHBAD`), readout noise (`RNOISE`), and the fitting radius (`FRAD`) used by ALLSTAR.
+
+### 2. The Data Columns
+
+Beneath the header, you will see a massive wall of numbers. Every single row represents a successful detection, and the data is always structured into **9 specific columns**:
+
+* **Column 1 (ID):** The star's unique identification number (carried over from your original `FIND` run).
+* **Column 2 (X):** The highly accurate, sub-pixel X coordinate of the star's centroid.
+* **Column 3 (Y):** The highly accurate, sub-pixel Y coordinate.
+* **Column 4 (Magnitude):** The instrumental magnitude of the star. *(Note: This is relative to the PSF model. To get true apparent magnitudes, you will eventually need to calibrate this against known standard stars in the field).*
+* **Column 5 (Mag Error):** The estimated standard error of the magnitude based on Poisson statistics and readout noise.
+* **Column 6 (Sky):** The estimated modal sky background value directly underneath that specific star.
+* **Column 7 (Iterations):** How many times the non-linear least-squares algorithm had to loop before the fit converged.
+* **Column 8 (CHI):** The ratio of the *observed* pixel scatter to the *expected* scatter. **(Crucial for quality control)**
+* **Column 9 (SHARP):** An image quality diagnostic indicating the shape of the object. **(Crucial for quality control)**
+
+---
+
+### Pro-Tips for Finding Your GRB
+
+Since you are hunting for a transient point-source, you can use the `CHI` and `SHARP` columns to violently filter out junk, cosmic rays, and background galaxies.
+
+If you are loading this into Python (using `pandas` or `astropy.table`) or a tool like TOPCAT, filter your data using these rules of thumb:
+
+* **The Perfect Point Source (Your GRB):** Should have a **`CHI` very close to 1.0** (meaning the noise is exactly what the Poisson statistics predicted) and a **`SHARP` value very close to 0.0**.
+* **Bad Pixels / Cosmic Rays:** Will usually have a large *negative* `SHARP` value.
+* **Galaxies / Unresolved Binaries:** Will usually have a significantly *positive* `SHARP` value (because they are wider/fuzzier than your PSF model).
+* **Failed Fits:** If a row has a `CHI` value massively higher than 1.0, ALLSTAR struggled to fit the PSF to it. The magnitude in Column 4 for that object is garbage.
+
+**Next Steps:**
+If you know the rough X/Y pixel coordinates of your GRB from visual inspection, search the file for those coordinates. Check its `CHI` and `SHARP` to ensure it's a clean detection, and grab that Column 4 magnitude!
+
+You hit the nail on the head. Scrolling through 720 lines in a terminal looking for one specific X/Y coordinate is a cruel rite of passage, but it is absolutely not how the actual daily work gets done.
+
+When dealing with fast-fading transients like GRBs or Supernovae, efficiency is everything. Once DAOPHOT spits out that `.als` catalog, nobody is hunting by eye. Here is exactly what the professional time-domain workflow looks like after the photometry is done:
+
+### 1. Scripted Cross-Matching (The Quick Hunt)
+
+Instead of opening the file in a text editor, astronomers feed that `.als` file straight into a Python script. Using libraries like `astropy.table` or `pandas`, you can instantly filter the catalog. You tell the script: *"Find the row where X is within 2 pixels of 397 and Y is within 2 pixels of 76,"* and it isolates your transient in milliseconds.
+
+Since you are already sitting at the command line, you can actually do this right now using a quick `awk` command without ever opening the file. If your GRB is around X:397, Y:76, just run this:
+
+```bash
+awk '$2 > 395 && $2 < 399 && $3 > 74 && $3 < 78 {print $0}' aaGRB_I_0.als
+
+```
+
+*This asks the terminal to print only the rows where column 2 (X) and column 3 (Y) fall within a tight bounding box.*
+
+### 2. Astrometry and WCS Mapping
+
+I noticed your FITS file was named `online_solved_MASTER...`, which implies you've already plate-solved the image. That means your FITS header contains a World Coordinate System (WCS).
+
+Astronomers use WCS to automatically map those pixel coordinates (X/Y) to celestial coordinates (Right Ascension and Declination). A script will take the known RA/Dec of the GRB alert (from Swift, Fermi, etc.), convert it to the exact X/Y pixel on your specific image, and pull the magnitude from the DAOPHOT catalog automatically.
+
+### 3. Absolute Photometric Calibration (The Holy Grail)
+
+That magnitude of `12.434` you got from DAOPHOT is an **instrumental magnitude**. It is essentially a raw, meaningless number based entirely on your telescope's specific detector, the exposure time, and the atmospheric conditions of that specific night.
+
+To make it real, astronomers take all the other stable, non-transient stars in that 720-entry catalog and cross-reference their RA/Dec coordinates against massive, standardized sky surveys (like Pan-STARRS, SDSS, or USNO-B1). By comparing the known, true magnitudes of those field stars to the instrumental magnitudes DAOPHOT just calculated, you find your **zero-point offset**. Apply that offset to your GRB, and you finally have its true apparent magnitude.
+
+### 4. Building the Light Curve
+
+A single magnitude is just a snapshot. The real science happens when you repeat this entire pipeline (stacking, DAOPHOT, calibration) across images taken hours, days, or weeks apart. You plot those calibrated magnitudes over time to build the light curve, measuring exactly how fast the GRB afterglow or supernova is decaying.
+
+---
+
+Do you already know the exact RA/Dec of this GRB to map it to your X/Y pixels, or are you ready to jump into calibrating that instrumental magnitude against standard field stars?

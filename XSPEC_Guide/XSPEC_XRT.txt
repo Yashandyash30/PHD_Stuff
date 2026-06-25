@@ -1,0 +1,96 @@
+XSPEC12>data  interval0pc.pi
+XSPEC12 >statistic cstat
+XSPEC12 > ignore **-0.3 10.0-**
+XSPEC12 > ignore bad
+
+XSPEC12> model tbabs * ztbabs * cflux * powerlaw
+
+Answer the parameter prompts exactly like this:
+
+    tbabs nH:  0.0416, -1
+
+    ztbabs nH: Hit Enter (Let XSPEC fit the intrinsic dust).
+
+    Redshift: 0 (Assuming z=0 for the host).
+
+    Emin: 0.3
+
+    Emax: 10.0
+
+    lg10Flux: Hit Enter.
+
+    PhoIndex: Hit Enter.
+
+    norm: Hit Enter.
+
+# 1. Set the powerlaw norm to 1.0 and freeze it (the -1 does the freezing)
+XSPEC12> newpar 8 1.0 -1
+
+XSPEC12> freeze 1
+XSPEC12> fit 100
+XSPEC12> err 2 6 7
+
+XSPEC12> flux 0.3 10.0
+
+XSPEC12> flux 0.3 10.0 err 100 90
+
+Plotting the Final Spectrum
+
+XSPEC12> cpd /xw
+XSPEC12> setplot energy
+
+! This command visually groups the data points so it doesn't look like a barcode
+XSPEC12> setplot rebin 5 100
+
+! Plot the data and the residuals underneath it
+XSPEC12> plot data resid
+XSPEC12> plot eeuf resid
+
+! Enter the interactive plotter to save the image
+XSPEC12> iplot
+PLT> log x on
+PLT> log y on
+PLT> rescale
+PLT> cpd xrt_spectrum.png/PNG
+PLT> plot
+PLT> exit
+
+
+
+
+
+Component
+ Parameter
+ Value to Enter
+ Explanation
+phabs
+ nH
+ 0.0416, -1
+ Galactic NH (from HEASARC nH Tool).
+Divide by 1022 . The -1 freezes it.
+zphabs
+ nH
+ 0.2
+ Intrinsic NH guess. Leave positive to fit.
+zphabs
+ Redshift
+ 1.14, -1
+ Enter z if known. If unknown, use 0.
+The -1 freezes it.
+powerlaw
+ PhoIndex
+ 2.0
+ Standard GRB slope guess.
+powerlaw
+ norm
+ (Enter)
+ Press Enter to use the default start value.
+
+
+
+
+
+XSPEC12> data 1 interval0pcsource.pi
+XSPEC12> back 1 interval0pcback.pi
+XSPEC12> response 1 interval0pc.rmf
+XSPEC12> arf 1 interval0pc.arf

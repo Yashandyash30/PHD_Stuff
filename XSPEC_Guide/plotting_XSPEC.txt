@@ -1,0 +1,34 @@
+! 1. Initialize the plotting window on your screen
+XSPEC12> cpd /xw
+
+! 2. Set the X-axis to display in Energy (keV)
+XSPEC12> setplot energy
+
+! 3. Visually group the data to remove the messy "barcode" error bars
+! (Combines bins until they reach 5-sigma significance, max 100 bins)
+XSPEC12> setplot rebin 5 100
+
+! 4. Plot the nuFnu spectrum (eeuf) and the residuals (resid)
+XSPEC12> plot eeuf resid
+
+! 5. Enter the interactive plotting mode to format and save
+XSPEC12> iplot
+
+! 6. Turn on logarithmic scales for both axes
+PLT> log x on
+PLT> log y on
+
+! 7. Refresh the view to apply the log scales
+PLT> rescale
+
+! 8. Save a quick visual PNG image of the plot
+! (Change the filename for each model, e.g., cutoffpl_spectrum.png)
+PLT> cpd grbm_spectrum.png/PNG
+PLT> plot
+
+! 9. Save the raw text data so you can make the multi-model Python plot later
+! (Change the filename for each model, e.g., cutoffpl_spectrum.qdp)
+PLT> wdata grbm_spectrum.qdp
+
+! 10. Exit the interactive plotter and return to the standard XSPEC prompt
+PLT> exit

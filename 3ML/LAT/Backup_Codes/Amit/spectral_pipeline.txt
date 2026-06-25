@@ -1,0 +1,176 @@
+from threeML import *
+
+# 1. Define exactly the detectors gtburst told you to use
+optimal_detectors = ["n3", "n4", "n5", "b0"]
+
+print(f"Downloading custom detector list: {optimal_detectors}...")
+
+# 2. Force the downloader to fetch only these specific files
+# (Using the trigger ID you referenced)
+dload = download_GBM_trigger_data("bn140304557", detectors=optimal_detectors)
+
+# 3. Load them into memory
+time_series = {}
+for det in optimal_detectors:
+    ts = TimeSeriesBuilder.from_gbm_tte(
+        name=det,
+        tte_file=dload[det]["tte"],
+        rsp_file=dload[det]["rsp"]
+    )
+    time_series[det] = ts
+
+print("\nAll optimal detectors successfully loaded!")
+
+grb_info = gbm_catalog.get_detector_information()["GRB140304557"]
+source_interval = grb_info["source"]["fluence"]
+background_interval = grb_info["background"]["full"]
+best_fit_model = grb_info["best fit model"]["fluence"]
+model = gbm_catalog.get_model(best_fit_model, "fluence")["GRB140304557"]
+
+fluence_plugins = []
+time_series = {}
+for det in optimal_detectors:
+
+    ts_cspec = TimeSeriesBuilder.from_gbm_cspec_or_ctime(
+        det, cspec_or_ctime_file=dload[det]["cspec"], rsp_file=dload[det]["rsp"]
+    )
+
+    ts_cspec.set_background_interval(*background_interval.split(","))
+    ts_cspec.save_background(f"{det}_bkg.h5", overwrite=True)
+
+    ts_tte = TimeSeriesBuilder.from_gbm_tte(
+        det,
+        tte_file=dload[det]["tte"],
+        rsp_file=dload[det]["rsp"],
+        restore_background=f"{det}_bkg.h5",
+    )
+
+    time_series[det] = ts_tte
+
+    ts_tte.set_active_time_interval(source_interval)
+
+    ts_tte.view_lightcurve(-40, 100)
+
+    fluence_plugin = ts_tte.to_spectrumlike()
+
+    if det.startswith("b"):
+
+        fluence_plugin.set_active_measurements("250-30000")
+
+    else:
+
+        fluence_plugin.set_active_measurements("9-900")
+
+    fluence_plugin.rebin_on_background(1.0)
+
+    fluence_plugins.append(fluence_plugin)
+
+n3.create_time_bins(-10, 50, method="bayesblocks", use_background=True, p0=0.01)
+print(n3.bins.starts)
+print(n3.bins.stops)
+fig = n3.view_lightcurve(use_binner=True)
+
+bad_bins = []
+for i, w in enumerate(n3.bins.widths):
+
+    if w < 5e-2:
+        bad_bins.append(i)
+
+
+edges = [n3.bins.starts[0]]
+
+for i, b in enumerate(n3.bins):
+
+    if i not in bad_bins:
+        edges.append(b.stop)
+
+starts = edges[:-1]
+stops = edges[1:]
+
+
+n3.create_time_bins(starts, stops, method="custom")
+print(n3.bins.starts)
+print(n3.bins.stops)
+
+fig = n3.view_lightcurve(use_binner=True)
+
+# Sync the other 3 detectors to n3 and convert them to plugins
+time_resolved_plugins = {}
+
+for k, v in time_series.items():
+    v.read_bins(n3)
+    time_resolved_plugins[k] = v.to_spectrumlike(from_bins=True)
+
+
+fit_data = np.zeros(16)
+
+
+for i in range(1,6):
+    n3_pha= "bn140304557_n3_srcspectra.pha{%d}"%(i)
+    n3_rsp= "bn140304557_n3_weightedrsp.rsp{%d}"%(i)
+    n3_bak= "bn140304557_n3_bkgspectra.bak{%d}"%(i)
+
+
+    nain3=OGIPLike("GBM_n3", observation= n3_pha, response= n3_rsp, background = n3_bak  )
+    nain3.set_active_measurements("8-33", "37-900")
+    #######################################################
+
+    n4_pha= "bn140304557_n4_srcspectra.pha{%d}"%(i)
+    n4_rsp= "bn140304557_n4_weightedrsp.rsp{%d}"%(i)
+    n4_bak= "bn140304557_n4_bkgspectra.bak{%d}"%(i)
+
+
+    nain4=OGIPLike("GBM_n4", observation= n4_pha, response= n4_rsp, background = n4_bak  )
+    nain4.set_active_measurements("8-33", "37-900")
+    #######################################################
+
+    n5_pha= "bn140304557_n5_srcspectra.pha{%d}"%(i)
+    n5_rsp= "bn140304557_n5_weightedrsp.rsp{%d}"%(i)
+    n5_bak= "bn140304557_n5_bkgspectra.bak{%d}"%(i)
+
+
+    nain5=OGIPLike("GBM_n5", observation= n5_pha, response= n5_rsp, background = n5_bak  )
+    nain5.set_active_measurements("8-33", "37-900")
+    #######################################################
+
+    b0_pha= "bn140304557_b0_srcspectra.pha{%d}"%(i)
+    b0_rsp= "bn140304557_b0_weightedrsp.rsp{%d}"%(i)
+    b0_bak= "bn140304557_b0_bkgspectra.bak{%d}"%(i)
+
+    bgob0=OGIPLike("GBM_b0", observation= b0_pha, response= b0_rsp, background = b0_bak)
+    bgob0.set_active_measurements("200-40000")
+
+
+    mod = Band()
+    model = Model(PointSource("GBM", RA, DEC, spectral_shape=mod)) #GRB = PointSource( triggerName, ra, dec, band )
+    model.GBM.spectrum.main.Band.alpha.bounds = (-1.7, 1)
+    model.GBM.spectrum.main.Band.K.prior= Log_uniform_prior(lower_bound=1e-4, upper_bound=1e1)
+    model.GBM.spectrum.main.Band.alpha.prior= Truncated_gaussian(lower_bound=-1.7, upper_bound=1, mu=-1, sigma=0.5)
+    model.GBM.spectrum.main.Band.xp.prior= Truncated_gaussian(lower_bound=10, upper_bound=1000, mu=300, sigma=200)
+    model.GBM.spectrum.main.Band.beta.prior= Truncated_gaussian(lower_bound=-4, upper_bound=-1.8, mu=-2.5, sigma=1)
+
+
+    data_list = DataList(nain3,nain4,nain5,bgob0)
+    bayes_analysis = BayesianAnalysis(model, data_list)
+
+    bayes_analysis.set_sampler("multinest")
+    bayes_analysis.sampler.setup(n_live_points=10000)
+    bayes_analysis.sample()
+    fig = plot_spectra(bayes_analysis.results,ene_min=1, ene_max=10e4, num_ene=200,contour_colors='white',contour_style_kwargs=dict(alpha=0.2), use_components= True, components_to_use=['total'],flux_unit='keV2/(cm2 s keV)')
+    plt.xlabel('Energy (keV)',fontsize='20')
+    plt.ylabel(r'$\rm \nu$ $\rm F_{\rm \nu}$ $\rm (keV$ $\rm cm^{-2}$ $\rm sec^{-1})$',fontsize='20')
+    fig = bayes_analysis.results.corner_plot()
+    fig.savefig('band_spec_%d'%(i))
+    a=bayes_analysis.results.get_point_source_flux(10 * u.keV, 10 * u.MeV)
+    print(a)
+
+    table1 = bayes_analysis.results.get_data_frame("equal tail")
+    table1 = table1.drop('unit', axis=1)
+    table1 = table1.to_numpy().reshape((16))
+
+    fit_data = np.vstack((fit_data, table1))
+
+fit_data
+band_fit_param = Table(fit_data[1:], names=['B_K', 'B_K_p_err', 'B_K_n_err', 'B_K_avg_err', 'B_alpha', 'B_alpha_p_err', 'B_alpha_n_err', 'B_alpha_avg_err', 'E_peak', 'E_peak_p_err', 'E_peak_n_err', 'E_peak_avg_err', 'beta', 'beta_p_err', 'beta_n_err', 'beta_avg_err'])
+band_fit_param.write('band_fit_param.csv', overwrite=True)
+band_fit_param

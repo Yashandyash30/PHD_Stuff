@@ -1,0 +1,161 @@
+TSTART keyword################################################################
+ftlist sw00145675000bevshsp_uf.evt.gz K | grep TSTART
+
+ position of the GRB (RA_OBJ and DEC_OBJ) ################################################################
+fkeyprint /home/mittu/GRB170906/BAT/00770957000/bat/event/sw00770957000bevshsp_uf.evt BAT_
+
+HEASOFT version ################################################################
+fkeyprint /home/mittu/GRB170906/BAT/00770957000/bat/event/sw00770957000bevshsp_uf.evt BATCREAT
+
+Detector plane image ###############################################################
+batbinevt \
+infile=/home/mittu/GRB170906/BAT/00770957000/bat/event/sw00770957000bevshsp_uf.evt \
+outfile= grb.dpi \
+outtype=DPI \
+timedel=0 \
+tstart=526351311 \
+tstop=526351511 \
+timebinalg=u \
+energybins=- \
+weighted=NO \
+outunits=COUNTS \
+clobber=yes
+
+Known Problematic Detectors ###############################################################
+batdetmask \
+date=grb.dpi \
+outfile=grb.detmask \
+clobber=YES \
+detmask= /home/mittu/GRB170906/BAT/00770957000/bat/hk/sw00770957000bdecb.hk.gz 
+
+Find Noisy Detectors ###############################################################
+bathotpix \
+detmask=grb.detmask \
+infile=grb.dpi \
+outfile=grb.qmap \
+clobber=YES
+
+Mask Weighting (Ray Tracing) ########################################################
+batmaskwtevt \
+infile=/home/mittu/GRB170906/BAT/00770957000/bat/event/sw00770957000bevshsp_uf.evt \
+attitude=/home/mittu/GRB170906/BAT/00770957000/auxil/sw00770957000sat.fits.gz \
+ra=203.95501 \
+dec=-47.10057 \
+detmask= /home/mittu/GRB170906/BAT/00770957000/bat/hk/sw00770957000bdecb.hk.gz \
+rebalance=YES \
+corrections=default \
+auxfile=/home/mittu/GRB170906/BAT/00770957000/bat/event/sw00770957000bevtr.fits \
+clobber=YES
+
+Make the light curve ########################################################
+batbinevt\
+detmask= grb.qmap \
+infile= /home/mittu/GRB170906/BAT/00770957000/bat/event/sw00770957000bevshsp_uf.evt \
+outfile=grb.lc \
+outtype=LC \
+timedel=1.0 \
+timebinalg=u \
+energybins=15-25, 25-50, 50-100, 100-350 \
+clobber=YES
+
+TIME - TRIGTIME LC #####################################################################
+fcalc grb.lc
+Name of output FITS file[grb_time.lc] 
+Resultant column name[TIME] 
+Arithmetic expression[TIME-TRIGTIME] 
+
+plot ####################################################################################
+fplot grb_time.lc
+Name of X Axis Parameter[error][TIME] 
+Name of Y Axis Parameter[error] up to 8 allowed[RATE(1)[ERROR], RATE(2)[ERROR], RATE(3)[ERROR], RATE(4)[ERROR]] 
+Lists of rows[-] 
+Device: /XWindow, /XTerm, /TK, /PS, etc[/XW] 
+PLT> r x -10 300
+quit
+
+Make the spectrum ###################################################
+526351406, 526351431 = -5, 20
+526351431, 526351461 = 20, 50
+526351461, 526351481 = 50, 70
+526351481, 526351531 = 70, 120
+526351406, 526351531 = -5, 120
+
+batbinevt \
+infile=/home/mittu/GRB170906/BAT/00770957000/bat/event/sw00770957000bevshsp_uf.evt \
+outfile=grb1.pha \
+outtype=PHA \
+timedel=0 \
+timebinalg=u \
+tstart=526351406 \
+tstop=526351431 \
+energybins=CALDB:80 \
+outunits=RATE \
+detmask=/home/mittu/GRB170906/BAT/00770957000/bat/hk/sw00770957000bdecb.hk.gz \
+clobber=YES
+
+batbinevt \
+infile=/home/mittu/GRB170906/BAT/00770957000/bat/event/sw00770957000bevshsp_uf.evt \
+outfile=grb2.pha \
+outtype=PHA \
+timedel=0 \
+timebinalg=u \
+tstart=526351431 \
+tstop=526351461 \
+energybins=CALDB:80 \
+outunits=RATE \
+detmask=/home/mittu/GRB170906/BAT/00770957000/bat/hk/sw00770957000bdecb.hk.gz \
+clobber=YES
+
+batbinevt \
+infile=/home/mittu/GRB170906/BAT/00770957000/bat/event/sw00770957000bevshsp_uf.evt \
+outfile=grb3.pha \
+outtype=PHA \
+timedel=0 \
+timebinalg=u \
+tstart=526351461 \
+tstop=526351481 \
+energybins=CALDB:80 \
+outunits=RATE \
+detmask=/home/mittu/GRB170906/BAT/00770957000/bat/hk/sw00770957000bdecb.hk.gz \
+clobber=YES
+
+batbinevt \
+infile=/home/mittu/GRB170906/BAT/00770957000/bat/event/sw00770957000bevshsp_uf.evt \
+outfile=grb4.pha \
+outtype=PHA \
+timedel=0 \
+timebinalg=u \
+tstart=526351481 \
+tstop=526351531 \
+energybins=CALDB:80 \
+outunits=RATE \
+detmask=/home/mittu/GRB170906/BAT/00770957000/bat/hk/sw00770957000bdecb.hk.gz \
+clobber=YES
+
+batbinevt \
+infile=/home/mittu/GRB170906/BAT/00770957000/bat/event/sw00770957000bevshsp_uf.evt \
+outfile=grb.pha \
+outtype=PHA \
+timedel=0 \
+timebinalg=u \
+tstart=526351406 \
+tstop=526351531 \
+energybins=CALDB:80 \
+outunits=RATE \
+detmask=/home/mittu/GRB170906/BAT/00770957000/bat/hk/sw00770957000bdecb.hk.gz \
+clobber=YES
+
+Apply Corrections to Spectrum #########################################################
+batupdatephakw grb.pha /home/mittu/GRB170906/BAT/00770957000/bat/event/sw00770957000bevtr.fits
+
+batphasyserr grb.pha CALDB
+
+Generate a Response Matrix
+#########################################################
+batdrmgen grb.pha grb.rsp NONE
+batdrmgen grb1.pha grb1.rsp NONE
+batdrmgen grb2.pha grb2.rsp NONE
+batdrmgen grb3.pha grb3.rsp NONE
+batdrmgen grb4.pha grb4.rsp NONE
+
+
