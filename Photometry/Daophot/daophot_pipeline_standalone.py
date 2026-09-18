@@ -55,17 +55,22 @@ Pipeline stages
 # ============================================================
 
 # --- Target ---
-TARGET_NAME   = "GRB200412"
-TARGET_RA     =  278.313375          # degrees
-TARGET_DEC    =  +62.532528         # degrees
+TARGET_NAME   = "NGC253"
+TARGET_RA     =  None               # degrees (set to None for all-star photometry)
+TARGET_DEC    =  None               # degrees (set to None for all-star photometry)
 GRB_T0_JD     =  2458951.881027           # Burst trigger time in Julian Days (adjust as needed)
 
 # --- Input image (WCS-solved, stacked FITS) ---
-STACKED_IMAGE = "1plst_V.fits"
+STACKED_IMAGE = "NGC253_R.fits"
+
+# --- Astrometry / WCS Fallback ---
+# If your primary STACKED_IMAGE lacks a WCS, the pipeline will borrow the WCS from this image.
+# Set to None if your primary image already has WCS.
+ASTROMETRY_REF_IMAGE = None
 
 # How to determine FRAMES_AVG and FRAMES_SUM: 'auto_avg', 'auto_sum', or 'manual'
 FRAMES_COUNT_MODE = 'auto_avg'
-STACKED_IMAGE_WILDCARD = "al_aaGRB_V_*" # Wildcard pattern for auto counting frames (used if mode is auto)
+STACKED_IMAGE_WILDCARD = "al_*" # Wildcard pattern for auto counting frames (used if mode is auto)
 
 # Pipeline mode :
 PIPELINE_MODE    = 'semi-auto' # 'auto' = full auto, 'semi-auto' = run AT, FI, PH, PI automatically, 'manual' = full manual (skip all, assume manual run)
@@ -73,7 +78,7 @@ PIPELINE_MODE    = 'semi-auto' # 'auto' = full auto, 'semi-auto' = run AT, FI, P
 # --- Zero-point calibration ---
 CALIBRATION_SYSTEM  = 'Pan-STARRS'    # Options: 'Pan-STARRS' or 'DIRECT_VEGA'
 DIRECT_VEGA_CATALOG = 'APASS'          # Options: 'APASS', 'Landolt', or 'Gaia'
-FILTER_BAND         = 'V'              # Target observing filter
+FILTER_BAND         = 'R'              # Target observing filter
 
 
 
@@ -120,13 +125,18 @@ FORCE_CENTROID = True      # snap to local brightness peak before injecting
 MATCH_RADIUS_PIX    = 8.0
 MATCH_RADIUS_ARCSEC = 2.0
 
+# --- Stellarity / Quality Cuts (for all-star catalog) ---
+FILTER_EXTENDED = True     # If True, filter out non-stellar objects (galaxies, cosmic rays)
+MAX_CHI         = 3.0      # Reject objects with CHI > this value (bad PSF fit)
+MAX_SHARP_ABS   = 1.0      # Reject objects with |SHARP| > this value (extended or cosmic ray)
+
 # --- DYNAMIC QUALITY CONSTRAINTS ---
 # Group 1: Dense, Deep, High-Precision Catalogs
 if CALIBRATION_SYSTEM == 'Pan-STARRS' or DIRECT_VEGA_CATALOG == 'Gaia':
-    QUERY_RADIUS_ARCMIN = 8                
-    REF_MAG_BRIGHT      = 14.0
-    REF_MAG_FAINT       = 16.5
-    REF_MAG_ERR_MAX     = 0.05
+    QUERY_RADIUS_ARCMIN = 12               
+    REF_MAG_BRIGHT      = 13.0
+    REF_MAG_FAINT       = 19.5
+    REF_MAG_ERR_MAX     = 0.08
     ZP_MATCH_RADIUS_AS  = 3.5             
 # Group 2: Sparse, Shallow, or Classical Catalogs
 elif CALIBRATION_SYSTEM == 'DIRECT_VEGA' and DIRECT_VEGA_CATALOG in ['APASS', 'Landolt']:
@@ -138,7 +148,15 @@ elif CALIBRATION_SYSTEM == 'DIRECT_VEGA' and DIRECT_VEGA_CATALOG in ['APASS', 'L
 
 # Global settings for all catalogs
 VIZIER_ROW_LIMIT    = 5000             
-ZP_MIN_STARS        = 5
+ZP_MIN_STARS        = 3
+
+# --- ZP Calibration Star Quality (tighter than catalog-wide cuts) ---
+ZP_MAX_CHI          = 2.0      # Only use stars with CHI < this for ZP (good PSF fit)
+ZP_MAX_SHARP_ABS    = 0.5      # Only use stars with |SHARP| < this for ZP (point sources)
+ZP_MAX_MERR         = 0.10     # Max instrumental mag error for ZP calibration stars
+GALAXY_EXCL_RADIUS_ARCSEC = 0  # Set > 0 to exclude stars within this radius of image centre
+EDGE_EXCL_MARGIN_PIXELS   = 50 # Set > 0 to exclude stars within this many pixels of image edges
+ZP_MAX_SCATTER_MAG        = 0.20 # Reject stars whose ZP differs from the median ZP by more than this
 
 # ============================================================
 
@@ -183,7 +201,14 @@ import subprocess
 import textwrap
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')
+try:
+    ipy = get_ipython()
+    try:
+        ipy.run_line_magic('matplotlib', 'notebook')
+    except Exception:
+        ipy.run_line_magic('matplotlib', 'inline')
+except NameError:
+    matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from pathlib import Path
@@ -197,10 +222,10 @@ from astropy.coordinates import SkyCoord
 from astropy.time import Time
 from astropy.wcs.utils import proj_plane_pixel_scales
 import astropy.units as u
-
 from astroquery.vizier import Vizier
-
-
+import warnings
+from astropy.io.fits.verify import VerifyWarning
+warnings.filterwarnings('ignore', category=VerifyWarning)
 # %%
 # CELL 3 : Functions
 # ============================================================
@@ -258,6 +283,8 @@ VIZIER_CATALOG_ID, VIZIER_COLUMNS, VIZIER_MAG_COL, VIZIER_ERR_COL = (
 def setup_dirs():
     for d in [WORK_DIR, PLOTS_DIR]:
         Path(d).mkdir(parents=True, exist_ok=True)
+    for sub in ['zero_point', 'photometry', 'fwhm']:
+        Path(os.path.join(PLOTS_DIR, sub)).mkdir(parents=True, exist_ok=True)
     print(f"[Setup] Work dir  : {os.path.abspath(WORK_DIR)}")
     print(f"[Setup] Plots dir : {os.path.abspath(PLOTS_DIR)}")
 
@@ -434,22 +461,32 @@ def create_forced_coo(forced_x, forced_y, coo_template_path, output_path,
 
 
 # ============================================================
-# CELL 6 : D0 — FWHM & SKY MEASUREMENT  (unchanged)
+# CELL 6 : D0 — FWHM & SKY MEASUREMENT (Robust)
 # ============================================================
+
+def get_wcs(header, ref_image_path=None):
+    """
+    Get WCS from header. If missing/invalid, try to load from ref_image_path.
+    """
+    try:
+        wcs = WCS(header, naxis=2)
+        if wcs.wcs.has_cd() or wcs.wcs.has_pc():
+            return wcs
+    except Exception:
+        pass
+        
+    if ref_image_path and os.path.exists(ref_image_path):
+        print(f"  [WCS] Primary image lacks WCS. Falling back to {ref_image_path}")
+        with fits.open(ref_image_path) as ref_hdul:
+            return WCS(ref_hdul[0].header, naxis=2)
+    return WCS(header, naxis=2)  # Will likely be invalid, but return it anyway
+
 
 def measure_fwhm_and_sky(image_path):
     """
     Estimate FWHM (Gaussian fits) and sky statistics from the image.
-    If you already have these from your photutil pipeline, pass them
-    via fwhm_override / sky_override to skip this step entirely.
-
-    Returns
-    -------
-    fwhm    : float  — median FWHM in pixels
-    sky     : float  — modal sky value  (3×median − 2×mean)
-    std_sky : float  — sky standard deviation
-    header  : FITS header
-    data    : raw data array
+    Robustly handles galaxy images by using shape-filtering and (if WCS available)
+    Gaia cross-matching to ensure only true point sources are measured.
     """
     print("\n" + "="*60)
     print("  D0: FWHM & SKY MEASUREMENT")
@@ -474,56 +511,151 @@ def measure_fwhm_and_sky(image_path):
     ny, nx = data.shape
     edge = int(min(nx, ny) * 0.05)
 
-    peaks = find_peaks(data - modal_sky, threshold=5.0 * std_sky, box_size=21)
+    # Find many peaks to build a robust statistical sample
+    peaks = find_peaks(data - modal_sky, threshold=5.0 * std_sky, box_size=15)
+    
+    if peaks is None or len(peaks) == 0:
+        raise RuntimeError("[D0] ❌ No sources found above 5 sigma.")
 
-    fwhm_list = []
-    if peaks is not None and len(peaks) > 0:
-        valid = (
-            (peaks['peak_value'] < sat - modal_sky) &
-            (peaks['x_peak'] > edge) & (peaks['x_peak'] < nx - edge) &
-            (peaks['y_peak'] > edge) & (peaks['y_peak'] < ny - edge)
-        )
-        peaks = peaks[valid]
-        peaks.sort('peak_value')
-        peaks.reverse()
+    valid = (
+        (peaks['peak_value'] < sat - modal_sky) &
+        (peaks['x_peak'] > edge) & (peaks['x_peak'] < nx - edge) &
+        (peaks['y_peak'] > edge) & (peaks['y_peak'] < ny - edge)
+    )
+    peaks = peaks[valid]
+    peaks.sort('peak_value')
+    peaks.reverse()
 
-        fitter = fitting.LevMarLSQFitter()
-        box_sz = 25
-        cy, cx = box_sz / 2.0, box_sz / 2.0
-        yy, xx = np.mgrid[:box_sz, :box_sz]
+    fitter = fitting.LevMarLSQFitter()
+    box_sz = 21
+    cy, cx = box_sz / 2.0, box_sz / 2.0
+    yy, xx = np.mgrid[:box_sz, :box_sz]
 
-        for star in peaks[:40]:
-            xc, yc = int(star['x_peak']), int(star['y_peak'])
-            try:
-                cut = Cutout2D(data, (xc, yc), box_sz).data
-            except Exception:
-                continue
-            g_init = (
-                models.Const2D(amplitude=modal_sky) +
-                models.Gaussian2D(
-                    amplitude=float(star['peak_value']),
-                    x_mean=cx, y_mean=cy,
-                    x_stddev=2.0, y_stddev=2.0
-                )
+    measured_sources = []
+    
+    # Process up to 500 bright peaks
+    for star in peaks[:500]:
+        xc, yc = int(star['x_peak']), int(star['y_peak'])
+        try:
+            cut = Cutout2D(data, (xc, yc), box_sz).data
+        except Exception:
+            continue
+            
+        g_init = (
+            models.Const2D(amplitude=modal_sky) +
+            models.Gaussian2D(
+                amplitude=float(star['peak_value']),
+                x_mean=cx, y_mean=cy,
+                x_stddev=2.0, y_stddev=2.0
             )
-            g_init.x_stddev_1.bounds = (0.5, 7.0)
-            g_init.y_stddev_1.bounds = (0.5, 7.0)
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore')
-                g_fit = fitter(g_init, xx, yy, cut)
-            sigma = (abs(g_fit.x_stddev_1.value) +
-                     abs(g_fit.y_stddev_1.value)) / 2.0
-            fwhm  = 2.355 * sigma
-            if 1.5 < fwhm < 15.0:
-                fwhm_list.append(fwhm)
+        )
+        g_init.x_stddev_1.bounds = (0.5, 7.0)
+        g_init.y_stddev_1.bounds = (0.5, 7.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            g_fit = fitter(g_init, xx, yy, cut)
+            
+        sigma_x = abs(g_fit.x_stddev_1.value)
+        sigma_y = abs(g_fit.y_stddev_1.value)
+        sigma = (sigma_x + sigma_y) / 2.0
+        fwhm  = 2.355 * sigma
+        
+        # Shape filtering: Must be roughly round (reject galaxies) and right size
+        ratio = sigma_x / sigma_y if sigma_y > 0 else 0
+        if 1.5 < fwhm < 15.0 and 0.8 < ratio < 1.25:
+            measured_sources.append({
+                'x': xc, 'y': yc, 'fwhm': fwhm, 'flux': float(star['peak_value'])
+            })
 
-    if len(fwhm_list) < 3:
+    if len(measured_sources) < 3:
         raise RuntimeError(
-            "[D0] ❌ Not enough clean stars to measure FWHM. "
+            "[D0] ❌ Not enough clean, round stars to measure FWHM. "
             "Check your image or SATURATION limit."
         )
-    _, fwhm_median, _ = sigma_clipped_stats(fwhm_list, sigma=2.5)
-    print(f"  FWHM → {fwhm_median:.2f} px  (from {len(fwhm_list)} stars)")
+
+    # Convert to table for cross-matching
+    src_table = Table(rows=measured_sources)
+    wcs = get_wcs(header, ASTROMETRY_REF_IMAGE)
+    
+    final_fwhms = []
+    cross_match_successful = False
+
+    # Attempt Gaia Cross-match if WCS is valid
+    if wcs.wcs.has_cd() or wcs.wcs.has_pc():
+        try:
+            ra_cen, dec_cen = wcs.pixel_to_world_values(nx/2, ny/2)
+            coord_cen = SkyCoord(ra_cen, dec_cen, unit='deg')
+            radius = np.max([nx, ny]) / 2.0 * proj_plane_pixel_scales(wcs)[0] * 3600 * u.arcsec
+            
+            print(f"  [D0] WCS found. Querying Gaia DR3 for point sources within {radius.value:.1f}\"")
+            v = Vizier(columns=['RA_ICRS', 'DE_ICRS', 'Gmag'], row_limit=5000)
+            res = v.query_region(coord_cen, radius=radius, catalog='I/355/gaiadr3')
+            
+            if res and len(res) > 0:
+                gaia_cat = res[0]
+                gaia_coords = SkyCoord(gaia_cat['RA_ICRS'], gaia_cat['DE_ICRS'], unit='deg')
+                src_coords = SkyCoord(*wcs.pixel_to_world_values(src_table['x'], src_table['y']), unit='deg')
+                
+                idx, d2d, _ = src_coords.match_to_catalog_sky(gaia_coords)
+                match_limit = 2.0 * u.arcsec
+                matched = d2d < match_limit
+                
+                matched_sources = src_table[matched]
+                if len(matched_sources) >= 3:
+                    final_fwhms = matched_sources['fwhm']
+                    cross_match_successful = True
+                    print(f"  [D0] Found {len(matched_sources)} Gaia point sources. Using these for FWHM.")
+                else:
+                    print("  [D0] Not enough Gaia matches. Falling back to stellar locus.")
+        except Exception as e:
+            print(f"  [D0] Gaia query failed: {e}. Falling back to stellar locus.")
+    else:
+        print("  [D0] No valid WCS found. Falling back to stellar locus.")
+
+    if not cross_match_successful:
+        # Fall back to the mode (densest region) of the FWHM distribution
+        # Since we already shape-filtered, the median of the smallest objects is usually safe
+        # but to be robust against a few small artifacts, we use sigma_clipped_stats
+        _, fwhm_median, _ = sigma_clipped_stats(src_table['fwhm'], sigma=2.0)
+        final_fwhms = src_table['fwhm']
+        print(f"  [D0] Using shape-filtered locus ({len(src_table)} objects).")
+
+    _, fwhm_median, _ = sigma_clipped_stats(final_fwhms, sigma=2.5)
+    print(f"  FWHM → {fwhm_median:.2f} px")
+
+    # --- SAVE FWHM DATA & PLOT ---
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
+        from astropy.visualization import ZScaleInterval, ImageNormalize
+        fwhm_dir = os.path.join(PLOTS_DIR, 'fwhm')
+        
+        if cross_match_successful:
+            final_table = matched_sources
+        else:
+            final_table = src_table
+            
+        txt_path = os.path.join(fwhm_dir, f"{TARGET_NAME}_fwhm_stars.txt")
+        with open(txt_path, 'w') as f:
+            f.write("X, Y, FWHM, FLUX\n")
+            for row in final_table:
+                f.write(f"{row['x']:.2f}, {row['y']:.2f}, {row['fwhm']:.3f}, {row['flux']:.2f}\n")
+                
+        img_path = os.path.join(fwhm_dir, f"{TARGET_NAME}_fwhm_stars.png")
+        fig, ax = plt.subplots(figsize=(10, 10))
+        norm = ImageNormalize(data, interval=ZScaleInterval())
+        ax.imshow(data, cmap='gray', origin='lower', norm=norm)
+        for row in final_table:
+            ax.add_patch(patches.Circle((row['x'], row['y']), radius=15, edgecolor='red', facecolor='none', lw=2))
+            ax.text(row['x']+18, row['y']+18, f"{row['fwhm']:.2f}", color='red', fontsize=8)
+        ax.set_title(f"Stars used for FWHM Calculation (Median FWHM = {fwhm_median:.2f})")
+        fig.savefig(img_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  [D0] Saved FWHM plot to {img_path}")
+        print(f"  [D0] Saved FWHM data to {txt_path}")
+    except Exception as e:
+        print(f"  [D0] Warning: Could not save FWHM plot/data: {e}")
+
     return fwhm_median, modal_sky, std_sky, header, data
 
 
@@ -1362,7 +1494,7 @@ def _empty_result():
 # CELL 16 : D8 — ZERO-POINT CALIBRATION  (unchanged)
 # ============================================================
 
-def calibrate_zero_point_daophot(als_table, wcs, image_shape, target_band=None):
+def calibrate_zero_point_daophot(als_table, wcs, image_shape, target_band=None, pipeline_mode='auto', image_path=None):
     if target_band is None:
         target_band = FILTER_BAND
 
@@ -1485,61 +1617,271 @@ def calibrate_zero_point_daophot(als_table, wcs, image_shape, target_band=None):
     ref_coords = SkyCoord(ra=good_stars[ra_col], dec=good_stars[dec_col])
     idx, d2d, _ = ref_coords.match_to_catalog_sky(catalog_coords)
 
+    # --- Galaxy exclusion zone ---
+    ny, nx = image_shape
+    img_center_ra, img_center_dec = wcs.wcs_pix2world(nx / 2, ny / 2, 0)
+    img_center_coord = SkyCoord(img_center_ra, img_center_dec, unit=(u.deg, u.deg))
+
+    # --- Extract ALLSTAR quality columns ---
+    als_chi   = np.array(als_table['CHI'],   dtype=float)
+    als_sharp = np.array(als_table['SHARP'], dtype=float)
+
     calculated_zps = []
     zp_indices = []
+    reject_reasons = []  # track why each matched star was kept or auto-rejected
+    
+    n_matched = 0
+    n_chi_rej = 0
+    n_sharp_rej = 0
+    n_merr_rej = 0
+    n_gal_rej = 0
+    n_edge_rej = 0
     
     for k in range(len(good_stars)):
         if d2d[k].arcsec < ZP_MATCH_RADIUS_AS:
-            inst_mag = m_inst[idx[k]]
-            if not np.isnan(inst_mag):
-                zp_val = true_mag[k] - inst_mag
-                calculated_zps.append(zp_val)
-                zp_indices.append((k, idx[k]))
-
-    if len(calculated_zps) >= ZP_MIN_STARS:
-        sc = SigmaClip(sigma=3.0, maxiters=5)
-        zp_mask = sc(calculated_zps).mask
-        good_zp = np.array(calculated_zps)[~zp_mask]
-        
-        if len(good_zp) == 0:
-             master_zp, master_zp_err = np.nan, np.nan
-             zp_table = None
-             print("  ⚠️ Not enough valid matches for a reliable zero point after clipping.")
-             return master_zp, master_zp_err, zp_table
-             
-        master_zp = float(np.median(good_zp))
-        master_zp_err = float(np.std(good_zp, ddof=1) / np.sqrt(len(good_zp)))
-        
-        print(f"  ✅ Master Zero Point = {master_zp:.4f} ± {master_zp_err:.4f}  "
-              f"(from {len(good_zp)}/{len(calculated_zps)} stars)")
-              
-        als_ids = []
-        xcenters = []
-        ycenters = []
-        matched_insts = []
-        matched_refs = []
-        
-        for (ref_k, als_k) in zp_indices:
-            als_ids.append(als_table['ID'][als_k])
-            xcenters.append(als_table['XCENTER'][als_k])
-            ycenters.append(als_table['YCENTER'][als_k])
-            matched_insts.append(m_inst[als_k])
-            matched_refs.append(true_mag[ref_k])
+            als_k = idx[k]
+            inst_mag = m_inst[als_k]
+            inst_err = m_inst_err[als_k]
+            chi_val  = als_chi[als_k]
+            sharp_val = als_sharp[als_k]
             
-        zp_table = Table({
-            'als_id'  : als_ids,
-            'xcenter' : xcenters,
-            'ycenter' : ycenters,
-            'm_inst'  : matched_insts,
-            'm_ref'   : matched_refs,
-            'zp_star' : calculated_zps,
-            'clipped' : zp_mask,
-        })
+            if np.isnan(inst_mag):
+                continue
+            
+            n_matched += 1
+            reason = ''
+            
+            # Stellarity filters (tighter than catalog-wide)
+            if chi_val > ZP_MAX_CHI:
+                reason = f'CHI={chi_val:.2f}>{ZP_MAX_CHI}'
+                n_chi_rej += 1
+            elif abs(sharp_val) > ZP_MAX_SHARP_ABS:
+                reason = f'|SHARP|={abs(sharp_val):.3f}>{ZP_MAX_SHARP_ABS}'
+                n_sharp_rej += 1
+            elif inst_err > ZP_MAX_MERR:
+                reason = f'MERR={inst_err:.3f}>{ZP_MAX_MERR}'
+                n_merr_rej += 1
+            
+            # Galaxy exclusion zone
+            if not reason and GALAXY_EXCL_RADIUS_ARCSEC > 0:
+                star_coord = SkyCoord(
+                    ra=good_stars[ra_col][k], dec=good_stars[dec_col][k])
+                sep = img_center_coord.separation(star_coord).arcsec
+                if sep < GALAXY_EXCL_RADIUS_ARCSEC:
+                    reason = f'galaxy_zone ({sep:.0f}"<{GALAXY_EXCL_RADIUS_ARCSEC}")'
+                    n_gal_rej += 1
+            
+            # Edge exclusion filter
+            if not reason and EDGE_EXCL_MARGIN_PIXELS > 0:
+                x_c = als_table['XCENTER'][als_k]
+                y_c = als_table['YCENTER'][als_k]
+                if (x_c < EDGE_EXCL_MARGIN_PIXELS or x_c > nx - EDGE_EXCL_MARGIN_PIXELS or
+                    y_c < EDGE_EXCL_MARGIN_PIXELS or y_c > ny - EDGE_EXCL_MARGIN_PIXELS):
+                    reason = f'edge_zone (margin={EDGE_EXCL_MARGIN_PIXELS}px)'
+                    n_edge_rej += 1
+            
+            zp_val = true_mag[k] - inst_mag
+            calculated_zps.append(zp_val)
+            zp_indices.append((k, als_k))
+            reject_reasons.append(reason)  # '' = passed all filters
+
+    # Report auto-filter results
+    n_auto_pass = sum(1 for r in reject_reasons if r == '')
+    print(f"  Matched {n_matched} catalog↔ALLSTAR pairs, "
+          f"{n_auto_pass} pass stellarity filters")
+    if n_chi_rej:   print(f"    ✂ CHI filter:   {n_chi_rej} rejected")
+    if n_sharp_rej: print(f"    ✂ SHARP filter: {n_sharp_rej} rejected")
+    if n_merr_rej:  print(f"    ✂ MERR filter:  {n_merr_rej} rejected")
+    if n_gal_rej:   print(f"    ✂ Galaxy zone:  {n_gal_rej} rejected")
+    if n_edge_rej:  print(f"    ✂ Edge zone:    {n_edge_rej} rejected")
+
+    # Build enriched ZP table (including auto-rejected for visibility)
+    als_ids, xcenters, ycenters = [], [], []
+    matched_insts, matched_refs = [], []
+    matched_chis, matched_sharps, matched_merrs = [], [], []
+    auto_rejected = []
+
+    for i, (ref_k, als_k) in enumerate(zp_indices):
+        als_ids.append(als_table['ID'][als_k])
+        xcenters.append(als_table['XCENTER'][als_k])
+        ycenters.append(als_table['YCENTER'][als_k])
+        matched_insts.append(m_inst[als_k])
+        matched_refs.append(true_mag[ref_k])
+        matched_chis.append(als_chi[als_k])
+        matched_sharps.append(als_sharp[als_k])
+        matched_merrs.append(m_inst_err[als_k])
+        auto_rejected.append(reject_reasons[i])
+
+    if len(calculated_zps) == 0:
+        print("  ⚠️ No matches found for zero-point calibration.")
+        return np.nan, np.nan, None
+
+    # Sigma-clip ONLY the stars that passed auto filters
+    calculated_zps = np.array(calculated_zps)
+    auto_pass_mask = np.array([r == '' for r in reject_reasons])
+    
+    if np.sum(auto_pass_mask) < ZP_MIN_STARS:
+        print(f"  ⚠️ Only {np.sum(auto_pass_mask)} stars passed stellarity filters "
+              f"(need {ZP_MIN_STARS}). Relaxing to all matched stars.")
+        auto_pass_mask[:] = True
+        auto_rejected = ['' for _ in auto_rejected]
+
+    # Sigma clip among passing stars
+    pass_zps = calculated_zps[auto_pass_mask]
+    sc = SigmaClip(sigma=2.5, maxiters=5) # Tightened from 3.0 to 2.5
+    clipped_result = sc(pass_zps)
+    clip_mask_pass = clipped_result.mask if hasattr(clipped_result, 'mask') else np.zeros(len(pass_zps), dtype=bool)
+
+    # Hard absolute scatter cut
+    if len(pass_zps[~clip_mask_pass]) > 0:
+        temp_median = np.median(pass_zps[~clip_mask_pass])
+        for i in range(len(pass_zps)):
+            if not clip_mask_pass[i] and abs(pass_zps[i] - temp_median) > ZP_MAX_SCATTER_MAG:
+                clip_mask_pass[i] = True
+
+    # Build full clipped mask (auto-rejected stars are marked as clipped too)
+    full_clipped = np.ones(len(calculated_zps), dtype=bool)
+    j = 0
+    for i in range(len(calculated_zps)):
+        if auto_pass_mask[i]:
+            full_clipped[i] = clip_mask_pass[j]
+            j += 1
+
+    good_zp = calculated_zps[~full_clipped]
+
+    if len(good_zp) == 0:
+        print("  ⚠️ Not enough valid matches for a reliable zero point after clipping.")
+        return np.nan, np.nan, None
+
+    master_zp = float(np.median(good_zp))
+    master_zp_err = float(np.std(good_zp, ddof=1) / np.sqrt(len(good_zp))) if len(good_zp) > 1 else 0.05
+
+    print(f"  ✅ Master Zero Point = {master_zp:.4f} ± {master_zp_err:.4f}  "
+          f"(from {len(good_zp)}/{len(calculated_zps)} stars)")
+
+    zp_table = Table({
+        'als_id'       : als_ids,
+        'xcenter'      : xcenters,
+        'ycenter'      : ycenters,
+        'm_inst'       : matched_insts,
+        'm_ref'        : matched_refs,
+        'zp_star'      : calculated_zps,
+        'chi'          : matched_chis,
+        'sharp'        : matched_sharps,
+        'merr'         : matched_merrs,
+        'auto_reject'  : auto_rejected,
+        'clipped'      : full_clipped,
+        'manual_reject': np.zeros(len(als_ids), dtype=bool),
+    })
+
+    # ── Interactive review (manual / semi-auto modes) ──────────────
+    if pipeline_mode in ('manual', 'semi-auto'):
+
+        # ── Show star map image BEFORE prompt ──────────────────
+        if image_path is not None:
+            try:
+                with fits.open(image_path) as hdul:
+                    _preview_data = hdul[0].data.astype(float)
+                _zs = ZScaleInterval()
+                _vmin, _vmax = _zs.get_limits(_preview_data)
+                _fig, _ax = plt.subplots(1, 1, figsize=(12, 10))
+                _ax.imshow(_preview_data, cmap='gray', origin='lower',
+                           vmin=_vmin, vmax=_vmax)
+                _ax.set_title(f"ZP Calibration Stars — review numbers below",
+                              fontsize=14, color='white')
+                _ax.set_facecolor('black')
+                for i, row in enumerate(zp_table):
+                    x, y = row['xcenter'], row['ycenter']
+                    is_auto = row['auto_reject'] != ''
+                    is_clip = bool(row['clipped'])
+                    if is_auto:
+                        clr = 'red'
+                    elif is_clip:
+                        clr = 'orange'
+                    else:
+                        clr = 'lime'
+                    _ax.add_patch(patches.Circle((x, y), radius=15,
+                                  edgecolor=clr, facecolor='none', lw=2))
+                    _ax.text(x+18, y+18, f"{i+1}",
+                             color=clr, fontsize=11, fontweight='bold')
+                plt.tight_layout()
+                plt.show()
+            except Exception as e:
+                print(f"  ⚠️ Could not generate preview: {e}")
+
+        # ── Point source criteria guide ────────────────────────
+        print("\n" + "─"*90)
+        print("  📋 INTERACTIVE ZP STAR REVIEW")
+        print("─"*90)
+        print("  ┌─────────────────────────────────────────────────────────┐")
+        print("  │  POINT SOURCE CRITERIA (ideal values for good stars):  │")
+        print("  │    CHI   ≈ 1.0  (good PSF fit,  reject if > 2.0)      │")
+        print("  │    SHARP ≈ 0.0  (point source,  reject if |val| > 0.5)│")
+        print("  │    MERR  < 0.05 (well-measured,  caution if > 0.1)    │")
+        print("  │    Resid ≈ 0.0  (consistent ZP,  suspect if > ±0.1)   │")
+        print("  └─────────────────────────────────────────────────────────┘")
+        print(f"\n  {'#':>3} {'ALS_ID':>7} {'m_inst':>8} {'m_ref':>8} "
+              f"{'ZP':>8} {'Resid':>8} {'CHI':>6} {'SHARP':>7} {'MERR':>6} {'Status'}")
+        print("  " + "-"*90)
+
+        for i, row in enumerate(zp_table):
+            resid = row['zp_star'] - master_zp
+            # Flag suspicious values
+            chi_flag   = '⚠' if row['chi'] > 2.0 else ' '
+            sharp_flag = '⚠' if abs(row['sharp']) > 0.5 else ' '
+            merr_flag  = '⚠' if row['merr'] > 0.05 else ' '
+            resid_flag = '⚠' if abs(resid) > 0.1 else ' '
+
+            status = '✓ USED'
+            if row['auto_reject']:
+                status = f'✂ AUTO ({row["auto_reject"]})'
+            elif row['clipped']:
+                status = '✂ SIGMA-CLIP'
+            print(f"  {i+1:>3} {row['als_id']:>7} {row['m_inst']:>8.3f} "
+                  f"{row['m_ref']:>8.3f} {row['zp_star']:>8.4f} "
+                  f"{resid_flag}{resid:>+7.4f} {chi_flag}{row['chi']:>5.2f} {sharp_flag}{row['sharp']:>+6.3f} "
+                  f"{merr_flag}{row['merr']:>5.3f}  {status}")
+
+        print(f"\n  Current ZP = {master_zp:.4f} ± {master_zp_err:.4f}")
+        print("\n  Enter star numbers to REJECT (comma-separated), or press Enter to accept all:")
+        print("  Example: 3,5,7   |   Look for ⚠ flags above")
         
-    else:
-        master_zp, master_zp_err = np.nan, np.nan
-        zp_table = None
-        print("  ⚠️ Not enough matches for a reliable zero point.")
+        try:
+            user_input = input("  > ").strip()
+        except EOFError:
+            user_input = ''
+
+        if user_input:
+            try:
+                reject_nums = [int(x.strip()) for x in user_input.split(',') if x.strip()]
+                for num in reject_nums:
+                    if 1 <= num <= len(zp_table):
+                        zp_table['manual_reject'][num - 1] = True
+                        print(f"    ❌ Rejected star #{num} (ALS_ID={zp_table['als_id'][num-1]})")
+                    else:
+                        print(f"    ⚠️ Star #{num} out of range, ignoring.")
+            except ValueError:
+                print("    ⚠️ Could not parse input, keeping all stars.")
+
+            # Recompute ZP excluding manual rejections
+            final_mask = (~zp_table['clipped']) & (~np.array(zp_table['manual_reject'])) & \
+                         np.array([r == '' for r in zp_table['auto_reject']])
+            final_zps = np.array(zp_table['zp_star'])[final_mask]
+
+            if len(final_zps) >= 2:
+                master_zp = float(np.median(final_zps))
+                master_zp_err = float(np.std(final_zps, ddof=1) / np.sqrt(len(final_zps)))
+            elif len(final_zps) == 1:
+                master_zp = float(final_zps[0])
+                master_zp_err = 0.05
+            else:
+                print("  ⚠️ No stars remaining after manual rejection!")
+                return np.nan, np.nan, zp_table
+
+            print(f"\n  ✅ Updated Zero Point = {master_zp:.4f} ± {master_zp_err:.4f}  "
+                  f"(from {len(final_zps)} stars after manual review)")
+        else:
+            print("    ✓ All stars accepted.")
 
     return master_zp, master_zp_err, zp_table
 
@@ -1550,13 +1892,61 @@ def calibrate_zero_point_daophot(als_table, wcs, image_shape, target_band=None):
 
 def compute_final_magnitude(target_result, zp, zp_err):
     r = dict(target_result)
-    if not r['detected'] or np.isnan(r.get('mag', np.nan)) or np.isnan(zp):
+    if not r.get('detected', False) or np.isnan(r.get('mag', np.nan)) or np.isnan(zp):
         r['cal_mag']     = np.nan
         r['cal_mag_err'] = np.nan
         return r
     r['cal_mag']     = r['mag'] + zp
     r['cal_mag_err'] = float(np.sqrt(r['merr']**2 + zp_err**2))
     return r
+
+def compute_all_magnitudes(als_table, zp, zp_err, wcs=None):
+    if als_table is None or len(als_table) == 0:
+        return None, None
+    
+    all_cal_mags = []
+    all_cal_mag_errs = []
+    filt_cal_mags = []
+    filt_cal_mag_errs = []
+    
+    for row in als_table:
+        mag = float(row['MAG'])
+        merr = float(row['MERR'])
+        chi = float(row['CHI'])
+        sharp = float(row['SHARP'])
+        
+        # Unfiltered magnitudes
+        if np.isnan(mag) or mag > 89 or np.isnan(zp):
+            all_cal_mags.append(np.nan)
+            all_cal_mag_errs.append(np.nan)
+        else:
+            all_cal_mags.append(mag + zp)
+            all_cal_mag_errs.append(np.sqrt(merr**2 + zp_err**2))
+            
+        # Filtered magnitudes
+        if (chi > MAX_CHI or abs(sharp) > MAX_SHARP_ABS) or np.isnan(mag) or mag > 89 or np.isnan(zp):
+            filt_cal_mags.append(np.nan)
+            filt_cal_mag_errs.append(np.nan)
+        else:
+            filt_cal_mags.append(mag + zp)
+            filt_cal_mag_errs.append(np.sqrt(merr**2 + zp_err**2))
+            
+    out_all = als_table.copy()
+    out_all['CAL_MAG'] = all_cal_mags
+    out_all['CAL_MAG_ERR'] = all_cal_mag_errs
+    
+    out_filt = als_table.copy()
+    out_filt['CAL_MAG'] = filt_cal_mags
+    out_filt['CAL_MAG_ERR'] = filt_cal_mag_errs
+    
+    if wcs is not None:
+        ras, decs = wcs.wcs_pix2world(out_all['XCENTER'], out_all['YCENTER'], 0)
+        out_all['RA'] = ras
+        out_all['DEC'] = decs
+        out_filt['RA'] = ras
+        out_filt['DEC'] = decs
+        
+    return out_all, out_filt
 
 
 # ============================================================
@@ -1588,7 +1978,7 @@ def plot_chi_sharp(als_table, target_name, save=True):
 
     plt.tight_layout()
     if save:
-        p = os.path.join(PLOTS_DIR, f"{target_name}_chi_sharp.png")
+        p = os.path.join(PLOTS_DIR, 'photometry', f"{target_name}_chi_sharp.png")
         fig.savefig(p, dpi=150, bbox_inches='tight')
         print(f"[Plot] CHI/SHARP → {p}")
     plt.close(fig)
@@ -1597,36 +1987,77 @@ def plot_chi_sharp(als_table, target_name, save=True):
 def plot_calibration_diagnostics(image_path, zp_table, master_zp, master_zp_err, save=True):
     if zp_table is None or len(zp_table) == 0:
         return
-        
-    matched_x, matched_y, true_mags, inst_mags, calib_mags = [], [], [], [], []
-    valid_stars = [row for row in zp_table if not row['clipped']]
-    
-    for row in valid_stars:
-        matched_x.append(row['xcenter'])
-        matched_y.append(row['ycenter'])
-        true_mags.append(row['m_ref'])
-        inst_mags.append(row['m_inst'])
-        calib_mags.append(row['m_inst'] + master_zp)
-        
+
     with fits.open(image_path) as hdul:
         clean_data = hdul[0].data.astype(float)
-        
+
     zscale = ZScaleInterval()
     vmin, vmax = zscale.get_limits(clean_data)
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 8))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 9))
     ax1.imshow(clean_data, cmap='gray', origin='lower', vmin=vmin, vmax=vmax)
-    ax1.set_title(f"Reference Stars Used for ZP ({len(matched_x)} stars)", fontsize=14)
-    for i in range(len(matched_x)):
-        ax1.add_patch(patches.Circle((matched_x[i], matched_y[i]), radius=15,
-                                      edgecolor='lime', facecolor='none', lw=2))
-        ax1.text(matched_x[i]+20, matched_y[i]+20, f"{i+1}",
-                 color='lime', fontsize=12, fontweight='bold')
-                 
-    if len(inst_mags) > 0:
-        x_vals = np.array([min(inst_mags), max(inst_mags)])
-        ax2.scatter(inst_mags, true_mags, color='blue', s=80, edgecolor='black', zorder=5)
+
+    # Categorise each star
+    has_manual = 'manual_reject' in zp_table.colnames
+    has_auto   = 'auto_reject'   in zp_table.colnames
+
+    used_x, used_y, used_inst, used_ref, used_idx = [], [], [], [], []
+    n_used = 0
+
+    for i, row in enumerate(zp_table):
+        x, y = row['xcenter'], row['ycenter']
+        is_auto    = has_auto and row['auto_reject'] != ''
+        is_clipped = bool(row['clipped'])
+        is_manual  = has_manual and bool(row['manual_reject'])
+
+        if is_auto:
+            color, label_prefix = 'red', '✂'
+        elif is_manual:
+            color, label_prefix = 'magenta', '✗'
+        elif is_clipped:
+            color, label_prefix = 'orange', 'σ'
+        else:
+            color, label_prefix = 'lime', ''
+            used_x.append(x); used_y.append(y)
+            used_inst.append(row['m_inst']); used_ref.append(row['m_ref'])
+            used_idx.append(i)
+            n_used += 1
+
+        ax1.add_patch(patches.Circle((x, y), radius=15,
+                                      edgecolor=color, facecolor='none', lw=2))
+        ax1.text(x+20, y+20, f"{label_prefix}{i+1}",
+                 color=color, fontsize=11, fontweight='bold')
+
+    # Legend patches for image panel
+    from matplotlib.lines import Line2D
+    legend_items = [
+        Line2D([0], [0], marker='o', color='lime',   lw=0, markersize=10, label=f'Used ({n_used})'),
+        Line2D([0], [0], marker='o', color='red',    lw=0, markersize=10, label='Auto-rejected'),
+        Line2D([0], [0], marker='o', color='orange', lw=0, markersize=10, label='Sigma-clipped'),
+    ]
+    if has_manual:
+        legend_items.append(
+            Line2D([0], [0], marker='o', color='magenta', lw=0, markersize=10, label='Manual-rejected'))
+    ax1.legend(handles=legend_items, loc='upper left', fontsize=10,
+               facecolor='black', edgecolor='white', labelcolor='white')
+    ax1.set_title(f"ZP Calibration Stars ({n_used} used / {len(zp_table)} matched)", fontsize=14)
+
+    # Scatter plot: used stars
+    if len(used_inst) > 0:
+        x_vals = np.array([min(used_inst), max(used_inst)])
+        ax2.scatter(used_inst, used_ref, color='blue', s=80, edgecolor='black',
+                    zorder=5, label='Used')
         ax2.plot(x_vals, x_vals + master_zp, color='red', linestyle='--', lw=2,
-                 label=f'ZP = {master_zp:.2f}')
+                 label=f'ZP = {master_zp:.3f}')
+
+    # Plot rejected stars as faded markers
+    for i, row in enumerate(zp_table):
+        is_auto    = has_auto and row['auto_reject'] != ''
+        is_clipped = bool(row['clipped'])
+        is_manual  = has_manual and bool(row['manual_reject'])
+        if is_auto or is_clipped or is_manual:
+            ax2.scatter(row['m_inst'], row['m_ref'], color='gray', s=50,
+                        edgecolor='red', alpha=0.4, zorder=3, marker='x')
+
     ax2.set_xlabel(r"Instrumental Magnitude ($m_{inst}$)", fontsize=12)
     ax2.set_ylabel(f"{CALIBRATION_SYSTEM} True Magnitude", fontsize=12)
     ax2.set_title("Calibration Quality", fontsize=14)
@@ -1635,12 +2066,43 @@ def plot_calibration_diagnostics(image_path, zp_table, master_zp, master_zp_err,
     ax2.text(0.05, 0.95, f"ZP Uncertainty: ±{master_zp_err:.3f} mag",
              transform=ax2.transAxes, fontsize=12, verticalalignment='top',
              bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-             
+
     plt.tight_layout()
     if save:
-        p = os.path.join(PLOTS_DIR, f'{TARGET_NAME}_zp_calibration.png')
+        p = os.path.join(PLOTS_DIR, 'zero_point', f'{TARGET_NAME}_zp_calibration.png')
         fig.savefig(p, dpi=150, bbox_inches='tight')
         print(f"[Plot] Calibration Diagnostics → {p}")
+
+        # --- Generate Second Plot (Used Only) ---
+        fig_used, (ax1_u, ax2_u) = plt.subplots(1, 2, figsize=(20, 9))
+        ax1_u.imshow(clean_data, cmap='gray', origin='lower', vmin=vmin, vmax=vmax)
+        
+        for x, y, idx in zip(used_x, used_y, used_idx):
+            ax1_u.add_patch(patches.Circle((x, y), radius=15, edgecolor='lime', facecolor='none', lw=2))
+            ax1_u.text(x+20, y+20, f"{idx+1}", color='lime', fontsize=11, fontweight='bold')
+            
+        legend_items_u = [Line2D([0], [0], marker='o', color='lime', lw=0, markersize=10, label=f'Used ({n_used})')]
+        ax1_u.legend(handles=legend_items_u, loc='upper left', fontsize=10, facecolor='black', edgecolor='white', labelcolor='white')
+        ax1_u.set_title(f"ZP Calibration Stars ({n_used} used)", fontsize=14)
+        
+        if len(used_inst) > 0:
+            x_vals = np.array([min(used_inst), max(used_inst)])
+            ax2_u.scatter(used_inst, used_ref, color='blue', s=80, edgecolor='black', zorder=5, label='Used')
+            ax2_u.plot(x_vals, x_vals + master_zp, color='red', linestyle='--', lw=2, label=f'ZP = {master_zp:.3f}')
+            
+        ax2_u.set_xlabel(r"Instrumental Magnitude ($m_{inst}$)", fontsize=12)
+        ax2_u.set_ylabel(f"{CALIBRATION_SYSTEM} True Magnitude", fontsize=12)
+        ax2_u.set_title("Calibration Quality (Used Only)", fontsize=14)
+        ax2_u.legend(fontsize=12)
+        ax2_u.grid(True, linestyle=':', alpha=0.7)
+        ax2_u.text(0.05, 0.95, f"ZP Uncertainty: ±{master_zp_err:.3f} mag", transform=ax2_u.transAxes, fontsize=12, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        plt.tight_layout()
+        p_used = os.path.join(PLOTS_DIR, 'zero_point', f'{TARGET_NAME}_zp_calibration_used_only.png')
+        fig_used.savefig(p_used, dpi=150, bbox_inches='tight')
+        print(f"[Plot] Calibration Diagnostics (Used Only) → {p_used}")
+        plt.close(fig_used)
+
     plt.close(fig)
 
 
@@ -1667,7 +2129,7 @@ def plot_target_confirmation(image_path, target_x, target_y, target_name, save=T
     ax2.grid(color='white', alpha=0.2, linestyle=':')
     plt.tight_layout()
     if save:
-        p = os.path.join(PLOTS_DIR, f'{target_name}_confirmation.png')
+        p = os.path.join(PLOTS_DIR, 'photometry', f'{target_name}_confirmation.png')
         fig.savefig(p, dpi=150, bbox_inches='tight')
         print(f"[Plot] Target Confirmation → {p}")
     plt.close(fig)
@@ -1707,9 +2169,40 @@ def plot_source_detections(image_path, coo_file, target_name, save=True):
     ax.axis('off')
     plt.tight_layout()
     if save:
-        p = os.path.join(PLOTS_DIR, f'{target_name}_source_detections.png')
+        p = os.path.join(PLOTS_DIR, 'photometry', f'{target_name}_source_detections.png')
         fig.savefig(p, dpi=150, bbox_inches='tight')
         print(f"[Plot] Source Detections → {p}")
+    plt.close(fig)
+
+def plot_all_stars_magnitudes(image_path, cal_table, target_name, save=True):
+    if cal_table is None or len(cal_table) == 0:
+        return
+        
+    with fits.open(image_path) as hdul:
+        clean_data = hdul[0].data.astype(float)
+        
+    zscale = ZScaleInterval()
+    vmin, vmax = zscale.get_limits(clean_data)
+    
+    fig, ax = plt.subplots(figsize=(12, 12))
+    ax.imshow(clean_data, cmap='gray', origin='lower', vmin=vmin, vmax=vmax)
+    
+    valid = ~np.isnan(cal_table['CAL_MAG'])
+    for row in cal_table[valid]:
+        x = row['XCENTER']
+        y = row['YCENTER']
+        mag = row['CAL_MAG']
+        
+        ax.add_patch(patches.Circle((x, y), radius=10, edgecolor='yellow', facecolor='none', lw=1.5))
+        ax.text(x + 12, y + 12, f"{mag:.2f}", color='yellow', fontsize=9, fontweight='bold')
+        
+    ax.set_title(f"All Stars Calibrated Magnitudes ({np.sum(valid)} stars)", fontsize=14)
+    ax.axis('off')
+    plt.tight_layout()
+    if save:
+        p = os.path.join(PLOTS_DIR, 'photometry', f'{target_name}_all_stars_mags.png')
+        fig.savefig(p, dpi=150, bbox_inches='tight')
+        print(f"[Plot] All Stars Magnitudes → {p}")
     plt.close(fig)
 
 
@@ -1717,7 +2210,7 @@ def plot_source_detections(image_path, coo_file, target_name, save=True):
 # CELL 18.5 : COMPREHENSIVE PIPELINE LOG
 # ============================================================
 
-def write_comprehensive_log(final_results, pipeline_mode, image_path=STACKED_IMAGE):
+def write_comprehensive_log(final_results, pipeline_mode, image_path=STACKED_IMAGE, target_ra=TARGET_RA, target_dec=TARGET_DEC):
     import datetime
 
     log_path = os.path.join(PLOTS_DIR, f"{TARGET_NAME}_pipeline.log")
@@ -1754,7 +2247,9 @@ def write_comprehensive_log(final_results, pipeline_mode, image_path=STACKED_IMA
         f.write(f"Input file  : {image_path}\n")
         f.write(f"Calibration : {CALIBRATION_SYSTEM} ({VIZIER_CATALOG_ID})\n")
         
-        orig_header = fits.getheader(image_path)
+        with fits.open(image_path, ignore_missing_simple=True) as hdul:
+            hdul.verify('fix')
+            orig_header = hdul[0].header
         date_obs_str = orig_header.get('DATE-OBS', 'UNKNOWN')
         t_obs_jd = np.nan
         delta_t_days = np.nan
@@ -1770,14 +2265,16 @@ def write_comprehensive_log(final_results, pipeline_mode, image_path=STACKED_IMA
 
         f.write(f"DATE-OBS    : {date_obs_str}\n")
         f.write(f"Obs JD      : {t_obs_jd:.4f}\n")
-        f.write(f"T - T_0     : {delta_t_days:.4f} days\n\n")
+        f.write(f"T - T_0     : {delta_t_days:.4f} days\n")
+        f.write(f"CCD Gain    : {GAIN:.2f} e⁻/ADU\n")
+        f.write(f"CCD ReadN   : {READ_NOISE:.2f} e⁻\n\n")
 
         with fits.open(image_path) as hdul:
-            wcs = WCS(hdul[0].header, naxis=2)
+            wcs = get_wcs(hdul[0].header, ASTROMETRY_REF_IMAGE)
         pixel_scale_degrees = proj_plane_pixel_scales(wcs)[0]
         pixel_scale_arcsec = pixel_scale_degrees * 3600
         f.write(f"Pixel Scale : {pixel_scale_arcsec:.3f} arcsec/pix\n")
-        f.write(f"GRB Target  : RA={TARGET_RA}, Dec={TARGET_DEC}\n")
+        f.write(f"GRB Target  : RA={target_ra}, Dec={target_dec}\n")
         
         pixel_x = final_results.get('pixel_x', np.nan)
         pixel_y = final_results.get('pixel_y', np.nan)
@@ -1796,37 +2293,91 @@ def write_comprehensive_log(final_results, pipeline_mode, image_path=STACKED_IMA
         f.write(f"Zero Point  : {zp:.3f} ± {zp_err:.3f}\n")
         
         if zp_table is not None:
-            f.write("\nCalibration Stars Cross-Check:\n")
-            f.write(f"{'Star':<6} | {'Reference (True)':<20} | {'Pipeline':<10} | {'Diff':<10}\n")
-            f.write("-" * 60 + "\n")
+            has_auto = 'auto_reject' in zp_table.colnames
+            has_manual = 'manual_reject' in zp_table.colnames
+            has_chi = 'chi' in zp_table.colnames
+
+            f.write("\nCalibration Stars (All Matched):\n")
+            f.write(f"{'#':<4} | {'m_inst':<10} | {'m_ref(cat)':<12} | "
+                    f"{'ZP_star':<10} | {'ΔZP':<8} |")
+            if has_chi:
+                f.write(f" {'CHI':<6} | {'SHARP':<7} | {'MERR':<6} |")
+            f.write(f" {'Status'}\n")
+            f.write("-" * 105 + "\n")
             
-            valid_count = 1
-            for row in zp_table:
-                if not row['clipped']:
-                    true_mag = row['m_ref']
-                    star_inst_mag = row['m_inst']
-                    calib_mag = star_inst_mag + zp
-                    diff = calib_mag - true_mag
-                    f.write(f"{valid_count:<6} | {true_mag:<20.3f} | {calib_mag:<10.3f} | {diff:+.3f}\n")
-                    valid_count += 1
+            for i, row in enumerate(zp_table):
+                zp_star = row['zp_star']
+                delta_zp = zp_star - zp  # per-star ZP minus master ZP
+                
+                status = 'USED'
+                if has_auto and row['auto_reject']:
+                    status = f"AUTO-REJ ({row['auto_reject']})"
+                elif has_manual and row['manual_reject']:
+                    status = 'MANUAL-REJ'
+                elif row['clipped']:
+                    status = 'SIGMA-CLIP'
+                
+                f.write(f"{i+1:<4} | {row['m_inst']:<10.3f} | {row['m_ref']:<12.3f} | "
+                        f"{zp_star:<10.4f} | {delta_zp:+.4f} |")
+                if has_chi:
+                    f.write(f" {row['chi']:<6.2f} | {row['sharp']:<+7.3f} | {row['merr']:<6.3f} |")
+                f.write(f" {status}\n")
+
+            f.write("\nCalibration Stars (ONLY USED):\n")
+            f.write(f"{'#':<4} | {'m_inst':<10} | {'m_ref(cat)':<12} | "
+                    f"{'ZP_star':<10} | {'ΔZP':<8} |")
+            if has_chi:
+                f.write(f" {'CHI':<6} | {'SHARP':<7} | {'MERR':<6} |")
+            f.write(f" {'Status'}\n")
+            f.write("-" * 105 + "\n")
+            
+            for i, row in enumerate(zp_table):
+                zp_star = row['zp_star']
+                delta_zp = zp_star - zp  # per-star ZP minus master ZP
+                
+                status = 'USED'
+                if has_auto and row['auto_reject']: continue
+                elif has_manual and row['manual_reject']: continue
+                elif row['clipped']: continue
+                
+                f.write(f"{i+1:<4} | {row['m_inst']:<10.3f} | {row['m_ref']:<12.3f} | "
+                        f"{zp_star:<10.4f} | {delta_zp:+.4f} |")
+                if has_chi:
+                    f.write(f" {row['chi']:<6.2f} | {row['sharp']:<+7.3f} | {row['merr']:<6.3f} |")
+                f.write(f" {status}\n")
+            
+            f.write(f"\n  Master ZP = {zp:.4f} ± {zp_err:.4f}\n")
+            f.write(f"  ΔZP = per-star ZP − Master ZP (scatter indicates calibration quality)\n")
         f.write("\n")
 
         f.write("--- PHOTOMETRY RESULTS ---\n")
-        if detected and not np.isnan(cal_mag):
-            f.write("Result      : DETECTED\n")
-            f.write(f"Detect Type : {detect_type}\n")
-            f.write(f"Sigma Thresh: {sigma_th}\n")
-            f.write(f"FINAL MAG   : {cal_mag:.3f} ± {cal_mag_err:.3f} mag ({FILTER_BAND}-band)\n")
-            f.write(f"Instrumental: {inst_mag:.3f} ± {inst_merr:.3f}\n")
-            f.write(f"CHI / SHARP : {chi:.2f} / {sharp:.3f}\n")
-            if ap_raw:
-                f.write("\n  --- Raw .ap row data ---\n")
-                f.write(f"{ap_raw}\n")
-            if als_raw:
-                f.write("\n  --- Raw .als row data ---\n")
-                f.write(f"{als_raw}\n")
+        if target_ra is not None and target_dec is not None:
+            if detected and not np.isnan(cal_mag):
+                f.write("Result      : DETECTED\n")
+                f.write(f"Detect Type : {detect_type}\n")
+                f.write(f"Sigma Thresh: {sigma_th}\n")
+                f.write(f"FINAL MAG   : {cal_mag:.3f} ± {cal_mag_err:.3f} mag ({FILTER_BAND}-band)\n")
+                f.write(f"Instrumental: {inst_mag:.3f} ± {inst_merr:.3f}\n")
+                f.write(f"CHI / SHARP : {chi:.2f} / {sharp:.3f}\n")
+                if ap_raw:
+                    f.write("\n  --- Raw .ap row data ---\n")
+                    f.write(f"{ap_raw}\n")
+                if als_raw:
+                    f.write("\n  --- Raw .als row data ---\n")
+                    f.write(f"{als_raw}\n")
+            else:
+                f.write("Result      : NON-DETECTION (Target not recovered by DAOPHOT)\n")
         else:
-            f.write("Result      : NON-DETECTION (Target not recovered by DAOPHOT)\n")
+            f.write(f"Result      : ALL STARS PROCESSED\n")
+            f.write(f"See {TARGET_NAME}_filtered_stars_mags.png for visual magnitudes.\n")
+            cal_table_all = final_results.get('all_sources_calibrated')
+            cal_table_filt = final_results.get('filtered_stars_calibrated')
+            if cal_table_all is not None:
+                valid_all = ~np.isnan(cal_table_all['CAL_MAG'])
+                f.write(f"Total sources (unfiltered): {np.sum(valid_all)}\n")
+            if cal_table_filt is not None:
+                valid_filt = ~np.isnan(cal_table_filt['CAL_MAG'])
+                f.write(f"Total clean stars (filtered): {np.sum(valid_filt)}\n")
         f.write("==================================================\n")
 
     print(f"\n[Save] Comprehensive Log → {os.path.abspath(log_path)}")
@@ -1969,7 +2520,7 @@ def run_daophot_pipeline(
     with fits.open(image_path) as hdul:
         header      = hdul[0].header
         image_shape = hdul[0].data.shape
-    wcs = WCS(header, naxis=2)
+    wcs = get_wcs(header, ASTROMETRY_REF_IMAGE)
 
     # ── D0 : FWHM & sky ────────────────────────────────────────────────
     if fwhm_override is not None:
@@ -2008,55 +2559,85 @@ def run_daophot_pipeline(
     als_file, sub_image, als_table = run_allstar_full(image_bn)
 
     # ── D7 : Target lookup (Initial) ───────────────────────────────────
-    target_info = lookup_target_in_als(
-        als_table, wcs, target_ra, target_dec
-    )
+    target_info = None
+    if target_ra is not None and target_dec is not None:
+        target_info = lookup_target_in_als(
+            als_table, wcs, target_ra, target_dec
+        )
 
     # ── D6 : Forced photometry (Fallback) ─────────────────────────────
     final_als_table = als_table
     is_forced = False
 
-    if not target_info['detected'] or force_coords is not None:
-        is_forced = True
-        if not target_info["detected"] and force_coords is None:
-            print("\n  ⚠️ Target not initially detected. Falling back to forced photometry...")
-            frc_ra, frc_dec = target_ra, target_dec
-        else:
-            frc_ra, frc_dec = force_coords
+    if target_ra is not None and target_dec is not None:
+        if not target_info['detected'] or force_coords is not None:
+            is_forced = True
+            if not target_info["detected"] and force_coords is None:
+                print("\n  ⚠️ Target not initially detected. Falling back to forced photometry...")
+                frc_ra, frc_dec = target_ra, target_dec
+            else:
+                frc_ra, frc_dec = force_coords
 
-        merged_als, merged_table, forced_x, forced_y = run_forced_photometry(
-            image_bn, als_table, fwhm, wcs, frc_ra, frc_dec
-        )
-        if merged_table is not None:
-            final_als_table = merged_table
-            print(f"  Using merged table ({len(merged_table)} stars)")
-            
-            # ── D7 : Target lookup (Post-Forced) ───────────────────────
-            target_info = lookup_target_in_als(
-                final_als_table, wcs, target_ra, target_dec
+            merged_als, merged_table, forced_x, forced_y = run_forced_photometry(
+                image_bn, als_table, fwhm, wcs, frc_ra, frc_dec
             )
+            if merged_table is not None:
+                final_als_table = merged_table
+                print(f"  Using merged table ({len(merged_table)} stars)")
+                
+                # ── D7 : Target lookup (Post-Forced) ───────────────────────
+                target_info = lookup_target_in_als(
+                    final_als_table, wcs, target_ra, target_dec
+                )
 
     # ── D8 : Zero-point calibration ────────────────────────────────────
     zp, zp_err, zp_table = calibrate_zero_point_daophot(
-        final_als_table, wcs, image_shape, filter_band
+        final_als_table, wcs, image_shape, filter_band,
+        pipeline_mode=pipeline_mode, image_path=image_path
     )
 
     # ── D9 : Apply ZP ──────────────────────────────────────────────────
-    final = compute_final_magnitude(target_info, zp, zp_err)
+    final = {}
+    if target_info is not None:
+        final = compute_final_magnitude(target_info, zp, zp_err)
+    final['detected'] = final.get('detected', False)
+
+    all_sources_calibrated, filtered_stars_calibrated = compute_all_magnitudes(final_als_table, zp, zp_err, wcs)
 
     # ── Diagnostic plots ───────────────────────────────────────────────
     plot_chi_sharp(final_als_table, target_name)
     plot_calibration_diagnostics(image_path, zp_table, zp, zp_err)
 
-    px = final.get('pixel_x', np.nan)
-    py = final.get('pixel_y', np.nan)
-    if np.isnan(px):
-        px, py = wcs.wcs_world2pix(target_ra, target_dec, 0)
-        px, py = float(px), float(py)
-    plot_target_confirmation(image_path, px, py, target_name)
+    if zp_table is not None:
+        reg_zp = os.path.join(PLOTS_DIR, 'zero_point', f'{target_name}_zp_calibration_stars.reg')
+        try:
+            with open(reg_zp, 'w') as f:
+                f.write('global dashlist=8 3 width=2 font="helvetica 10 normal roman"\n')
+                f.write('image\n')
+                for i, row in enumerate(zp_table):
+                    x, y = row['xcenter'], row['ycenter']
+                    is_auto = row['auto_reject'] != ''
+                    is_clip = bool(row['clipped'])
+                    is_manual = 'manual_reject' in zp_table.colnames and bool(row['manual_reject'])
+                    
+                    if not (is_auto or is_clip or is_manual):
+                        # Write used stars with a lime circle
+                        f.write(f'circle({x:.2f},{y:.2f},15) # color=lime text="{{{i+1}}}"\n')
+            print(f"  [Output] Calibration Stars Regions → {reg_zp}")
+        except Exception as e:
+            print(f"  ⚠️ Could not save ZP regions: {e}")
+
+    if target_ra is not None and target_dec is not None:
+        px = final.get('pixel_x', np.nan)
+        py = final.get('pixel_y', np.nan)
+        if np.isnan(px):
+            px, py = wcs.wcs_world2pix(target_ra, target_dec, 0)
+            px, py = float(px), float(py)
+        plot_target_confirmation(image_path, px, py, target_name)
     
     coo_file = workpath(f"{get_stem(image_bn)}.coo")
     plot_source_detections(image_path, coo_file, target_name)
+    plot_all_stars_magnitudes(image_path, filtered_stars_calibrated, target_name + "_filtered")
 
     # Extract raw rows if detected
     ap_raw = None
@@ -2072,7 +2653,7 @@ def run_daophot_pipeline(
                     except:
                         pass
 
-    if final['detected']:
+    if final.get('detected'):
         target_id = final.get("id", -1)
         # Determine the AP file used
         ap_f = workpath(f"{get_stem(image_bn)}_merged.ap") if is_forced else workpath(f"{get_stem(image_bn)}.ap")
@@ -2085,35 +2666,73 @@ def run_daophot_pipeline(
     print("\n" + "="*60)
     print("  RESULT")
     print("="*60)
-    print(f"  Target      : {target_name}")
-    print(f"  Detected    : {final['detected']}")
     
-    if final['detected']:
-        detection_type = "Forced Photometry" if is_forced else "Normal Intrinsic Find"
-        print(f"  Detect Type : {detection_type}")
-        print(f"  Sigma Thresh: {sigma_th}")
+    if target_ra is not None and target_dec is not None:
+        print(f"  Target      : {target_name}")
+        print(f"  Detected    : {final['detected']}")
+        
+        if final['detected']:
+            detection_type = "Forced Photometry" if is_forced else "Normal Intrinsic Find"
+            print(f"  Detect Type : {detection_type}")
+            print(f"  Sigma Thresh: {sigma_th}")
 
-    if final['detected'] and not np.isnan(final.get('cal_mag', np.nan)):
-        print(f"  Calibrated  : {final['cal_mag']:.3f} ± {final['cal_mag_err']:.3f}  ({filter_band}-band)")
-        print(f"  Instrumental: {final['mag']:.3f} ± {final['merr']:.3f}")
-        print(f"  Zero-point  : {zp:.4f} ± {zp_err:.4f}")
-        print(f"  CHI / SHARP : {final['chi']:.2f} / {final['sharp']:.3f}")
-        print(f"  Pixel pos   : X={final['pixel_x']:.2f}  Y={final['pixel_y']:.2f}  (dist={final['dist_pix']:.2f}px)")
-              
-        if ap_raw:
-            print("\n  --- Raw .ap row data ---")
-            print(ap_raw)
-        if als_raw:
-            print("\n  --- Raw .als row data ---")
-            print(als_raw)
+        if final['detected'] and not np.isnan(final.get('cal_mag', np.nan)):
+            print(f"  Calibrated  : {final['cal_mag']:.3f} ± {final['cal_mag_err']:.3f}  ({filter_band}-band)")
+            print(f"  Instrumental: {final['mag']:.3f} ± {final['merr']:.3f}")
+            print(f"  Zero-point  : {zp:.4f} ± {zp_err:.4f}")
+            print(f"  CHI / SHARP : {final['chi']:.2f} / {final['sharp']:.3f}")
+            print(f"  Pixel pos   : X={final['pixel_x']:.2f}  Y={final['pixel_y']:.2f}  (dist={final['dist_pix']:.2f}px)")
+                  
+            if ap_raw:
+                print("\n  --- Raw .ap row data ---")
+                print(ap_raw)
+            if als_raw:
+                print("\n  --- Raw .als row data ---")
+                print(als_raw)
+        else:
+            print("  ⚠️  Target not recovered by DAOPHOT.")
+            print("     → Set  FORCE_COORDS = (ra, dec)  to inject position.")
+            print(f"  Zero-point  : {zp:.4f} ± {zp_err:.4f}")
     else:
-        print("  ⚠️  Target not recovered by DAOPHOT.")
-        print("     → Set  FORCE_COORDS = (ra, dec)  to inject position.")
+        print(f"  Processed all stars without specific target matching.")
         print(f"  Zero-point  : {zp:.4f} ± {zp_err:.4f}")
+        
+        if all_sources_calibrated is not None and filtered_stars_calibrated is not None:
+            valid_all = ~np.isnan(all_sources_calibrated['CAL_MAG'])
+            valid_filt = ~np.isnan(filtered_stars_calibrated['CAL_MAG'])
+            print(f"  Total sources (unfiltered): {np.sum(valid_all)}")
+            print(f"  Total clean stars (filtered): {np.sum(valid_filt)}")
+            print(f"  See {target_name}_filtered_all_stars_mags.png for visual magnitudes.")
+            
+            # Save Unfiltered
+            csv_all = os.path.join(PLOTS_DIR, 'photometry', f'{target_name}_all_sources_mags.csv')
+            reg_all = os.path.join(PLOTS_DIR, 'photometry', f'{target_name}_all_sources_mags.reg')
+            try:
+                all_sources_calibrated.write(csv_all, format='csv', overwrite=True)
+                with open(reg_all, 'w') as f:
+                    f.write('global color=cyan dashlist=8 3 width=1 font="helvetica 10 normal roman"\n')
+                    f.write('image\n')
+                    for row in all_sources_calibrated[valid_all]:
+                        f.write(f'circle({row["XCENTER"]:.2f},{row["YCENTER"]:.2f},10) # text="{{{row["ID"]} m:{row["CAL_MAG"]:.2f}±{row["CAL_MAG_ERR"]:.2f}}}"\n')
+            except Exception as e: print(f"  ⚠️ Could not save unfiltered catalogs: {e}")
+
+            # Save Filtered
+            csv_filt = os.path.join(PLOTS_DIR, 'photometry', f'{target_name}_filtered_stars_mags.csv')
+            reg_filt = os.path.join(PLOTS_DIR, 'photometry', f'{target_name}_filtered_stars_mags.reg')
+            try:
+                filtered_stars_calibrated.write(csv_filt, format='csv', overwrite=True)
+                with open(reg_filt, 'w') as f:
+                    f.write('global color=green dashlist=8 3 width=1 font="helvetica 10 normal roman"\n')
+                    f.write('image\n')
+                    for row in filtered_stars_calibrated[valid_filt]:
+                        f.write(f'circle({row["XCENTER"]:.2f},{row["YCENTER"]:.2f},10) # text="{{{row["ID"]} m:{row["CAL_MAG"]:.2f}±{row["CAL_MAG_ERR"]:.2f}}}"\n')
+                print(f"  Saved outputs to {PLOTS_DIR}/")
+            except Exception as e: print(f"  ⚠️ Could not save filtered catalogs: {e}")
+                
     print("="*60)
 
     final_output_dict = {
-        'detected'   : final['detected'],
+        'detected'   : final.get('detected', False),
         'cal_mag'    : final.get('cal_mag', np.nan),
         'cal_mag_err': final.get('cal_mag_err', np.nan),
         'inst_mag'   : final.get('mag', np.nan),
@@ -2131,13 +2750,15 @@ def run_daophot_pipeline(
         'std_sky'    : std_sky,
         'als_table'  : final_als_table if 'final_als_table' in locals() else None,
         'zp_table'   : zp_table if 'zp_table' in locals() else None,
+        'all_sources_calibrated': all_sources_calibrated,
+        'filtered_stars_calibrated': filtered_stars_calibrated,
         'detect_type': "Forced Photometry" if is_forced else "Normal Intrinsic Find",
         'sigma_th'   : sigma_th,
         'ap_raw'     : ap_raw,
         'als_raw'    : als_raw,
     }
 
-    write_comprehensive_log(final_output_dict, pipeline_mode, image_path)
+    write_comprehensive_log(final_output_dict, pipeline_mode, image_path, target_ra, target_dec)
 
     return final_output_dict
 
@@ -2160,7 +2781,7 @@ def run_daophot_pipeline(
 # =====================================================================
 # CELL 1: MANUAL WORKSPACE CONFIGURATION
 # =====================================================================
-manual_daophot_done = True   # Set to True after you finish the terminal steps
+manual_daophot_done = False   # Set to True after you finish the terminal steps
 
 # Provide your photutils measurements here (or leave None for auto-measurement)
 FWHM_VAL = None  
@@ -2171,21 +2792,20 @@ STD_VAL  = None
 # =====================================================================
 # CELL 2: PREPARE WORKSPACE FOR MANUAL TERMINAL MODE
 # =====================================================================
-from daophot_pipeline_standalone import prepare_manual_workspace
-
-if PIPELINE_MODE in ['manual', 'semi-auto']:
-    if not manual_daophot_done:
-        measured_fwhm = prepare_manual_workspace(
-            image_path       = STACKED_IMAGE,
-            fwhm_override    = FWHM_VAL,
-            sky_override     = SKY_VAL,
-            std_sky_override = STD_VAL,
-            pipeline_mode    = PIPELINE_MODE
-        )
+if __name__ == '__main__':
+    if PIPELINE_MODE in ['manual', 'semi-auto']:
+        if not manual_daophot_done:
+            measured_fwhm = prepare_manual_workspace(
+                image_path       = STACKED_IMAGE,
+                fwhm_override    = FWHM_VAL,
+                sky_override     = SKY_VAL,
+                std_sky_override = STD_VAL,
+                pipeline_mode    = PIPELINE_MODE
+            )
+        else:
+            print("Manual workspace preparation skipped because manual_daophot_done is True.")
     else:
-        print("Manual workspace preparation skipped because manual_daophot_done is True.")
-else:
-    print("Manual workspace preparation skipped because PIPELINE_MODE is 'auto'.")
+        print("Manual workspace preparation skipped because PIPELINE_MODE is 'auto'.")
 
 # %% [markdown]
 # ### 🛑 STOP: Open Your Terminal Now! (If PIPELINE_MODE in ['manual', 'semi-auto'] and manual_daophot_done is False)
@@ -2197,26 +2817,22 @@ else:
 # *Once you have created the `.psf` file and exited DAOPHOT, change `manual_daophot_done = True` in CELL 1 and re-run.*
 
 # %%
-# =====================================================================
-# CELL 3: RUN ALLSTAR, FORCED PHOTOMETRY, & VIZIER CALIBRATION
-# =====================================================================
-from daophot_pipeline_standalone import run_daophot_pipeline
-
-if PIPELINE_MODE in ['manual', 'semi-auto']:
-    if manual_daophot_done:
-        final_results = run_daophot_pipeline(
-            image_path    = STACKED_IMAGE,
-            target_ra     = TARGET_RA,
-            target_dec    = TARGET_DEC,
-            target_name   = TARGET_NAME,
-            filter_band   = FILTER_BAND,
-            pipeline_mode = PIPELINE_MODE
-        )
-        print("\nFinal Calibrated Magnitude:", final_results.get('cal_mag'))
+if __name__ == '__main__':
+    if PIPELINE_MODE in ['manual', 'semi-auto']:
+        if manual_daophot_done:
+            final_results = run_daophot_pipeline(
+                image_path    = STACKED_IMAGE,
+                target_ra     = TARGET_RA,
+                target_dec    = TARGET_DEC,
+                target_name   = TARGET_NAME,
+                filter_band   = FILTER_BAND,
+                pipeline_mode = PIPELINE_MODE
+            )
+            print("\nFinal Calibrated Magnitude:", final_results.get('cal_mag'))
+        else:
+            print("Waiting for manual DAOPHOT completion. Set manual_daophot_done = True when finished.")
     else:
-        print("Waiting for manual DAOPHOT completion. Set manual_daophot_done = True when finished.")
-else:
-    print("Skipping CELL 3 because PIPELINE_MODE is 'auto'.")
+        print("Skipping CELL 3 because PIPELINE_MODE is 'auto'.")
 
 # %%
 # =====================================================================
@@ -2225,16 +2841,16 @@ else:
 # If your frame is sparse and you trust DAOPHOT to build the PSF silently
 # (ensure WA = -2 in daophot.opt), this will run everything.
 
-if PIPELINE_MODE == 'auto':
-    from daophot_pipeline_standalone import run_daophot_pipeline
-    final_results = run_daophot_pipeline(
-        image_path    = STACKED_IMAGE,
-        target_ra     = TARGET_RA,
-        target_dec    = TARGET_DEC,
-        target_name   = TARGET_NAME,
-        filter_band   = FILTER_BAND,
-        pipeline_mode = 'auto'
-    )
-    print("\nFinal Calibrated Magnitude:", final_results.get('cal_mag'))
-else:
-    print("Skipping FULLY AUTOMATED RUN because PIPELINE_MODE is 'manual' or 'semi-auto'.")
+if __name__ == '__main__':
+    if PIPELINE_MODE == 'auto':
+        final_results = run_daophot_pipeline(
+            image_path    = STACKED_IMAGE,
+            target_ra     = TARGET_RA,
+            target_dec    = TARGET_DEC,
+            target_name   = TARGET_NAME,
+            filter_band   = FILTER_BAND,
+            pipeline_mode = 'auto'
+        )
+        print("\nFinal Calibrated Magnitude:", final_results.get('cal_mag'))
+    else:
+        print("Skipping FULLY AUTOMATED RUN because PIPELINE_MODE is 'manual' or 'semi-auto'.")

@@ -8,9 +8,9 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.19.3
 #   kernelspec:
-#     display_name: Python 3
+#     display_name: Python (Astro Photometry)
 #     language: python
-#     name: python3
+#     name: astro_photometry
 # ---
 
 # %% [markdown]
@@ -207,46 +207,52 @@ print("\nAll MCMC results with stats saved to all_models_mcmc_results.csv")
 # ## Plot MCMC Lightcurve
 
 # %%
+import astropy.io.fits as fits
+
 mcmc_df_plot = pd.read_csv('all_models_mcmc_results.csv')
 mcmc_df_plot.set_index('Model', inplace=True)
 
+
 t_plot = np.logspace(np.log10(min(t)*0.8), np.log10(max(t)*1.2), 500)
-plt.figure(figsize=(10, 6))
-plt.errorbar(t, F, yerr=F_err, fmt='o', label='Data', color='black', capsize=3)
+fig, ax1 = plt.subplots(figsize=(10, 6))
+
+ax1.errorbar(t, F, yerr=F_err, fmt='o', label='Optical Data', color='black', capsize=3)
 
 # Plot each model using its MCMC median parameters
 try:
     row = mcmc_df_plot.loc['Single PL']
-    plt.plot(t_plot, single_pl(t_plot, row['K'], row['alpha']), label='Single PL', linestyle=':', alpha=0.7)
+    ax1.plot(t_plot, single_pl(t_plot, row['K'], row['alpha']), label='Single PL', linestyle=':', alpha=0.7)
 except Exception as e: print("Skipped Single PL", e)
 
 try:
     row = mcmc_df_plot.loc['Broken PL (Piecewise)']
-    plt.plot(t_plot, piecewise_bpl(t_plot, row['K'], row['alpha1'], row['alpha2'], row['tb']), label='Broken PL (Piecewise)', linestyle='-.', alpha=0.7)
+    ax1.plot(t_plot, piecewise_bpl(t_plot, row['K'], row['alpha1'], row['alpha2'], row['tb']), label='Broken PL (Piecewise)', linestyle='-.', alpha=0.7)
 except Exception as e: print("Skipped Piecewise BPL", e)
 
 try:
     row = mcmc_df_plot.loc['Broken PL (Smooth)']
-    plt.plot(t_plot, broken_pl(t_plot, row['K'], row['alpha1'], row['alpha2'], row['tb'], row['s']), label='Broken PL (Smooth)', linestyle='--', alpha=0.8)
+    ax1.plot(t_plot, broken_pl(t_plot, row['K'], row['alpha1'], row['alpha2'], row['tb'], row['s']), label='Broken PL (Smooth)', linestyle='--', alpha=0.8)
 except Exception as e: print("Skipped Smooth BPL", e)
 
 try:
     row = mcmc_df_plot.loc['Double Broken PL (Piecewise)']
-    plt.plot(t_plot, double_piecewise_bpl(t_plot, row['K'], row['alpha1'], row['alpha2'], row['alpha3'], row['tb1'], row['tb2']), label='Double Broken PL (Piecewise)', linestyle=(0, (3, 5, 1, 5, 1, 5)), alpha=0.8)
+    ax1.plot(t_plot, double_piecewise_bpl(t_plot, row['K'], row['alpha1'], row['alpha2'], row['alpha3'], row['tb1'], row['tb2']), label='Double Broken PL (Piecewise)', linestyle=(0, (3, 5, 1, 5, 1, 5)), alpha=0.8)
 except Exception as e: print("Skipped Double Piecewise BPL", e)
 
 try:
     row = mcmc_df_plot.loc['Double Broken PL (Smooth)']
-    plt.plot(t_plot, double_smooth_bpl(t_plot, row['K'], row['alpha1'], row['alpha2'], row['alpha3'], row['tb1'], row['tb2'], row['s1'], row['s2']), label='Double Broken PL (Smooth)', linestyle='-', linewidth=2)
+    ax1.plot(t_plot, double_smooth_bpl(t_plot, row['K'], row['alpha1'], row['alpha2'], row['alpha3'], row['tb1'], row['tb2'], row['s1'], row['s2']), label='Double Broken PL (Smooth)', linestyle='-', linewidth=2)
 except Exception as e: print("Skipped Double Smooth BPL", e)
 
-plt.xscale('log')
-plt.yscale('log')
-plt.xlabel('Time (s)')
-plt.ylabel(r'Flux Density ($\mu$Jy)')
+ax1.set_xscale('log')
+ax1.set_yscale('log')
+ax1.set_xlabel('Time (s)')
+ax1.set_ylabel(r'Flux Density ($\mu$Jy)')
+
 plt.title('GRB 081203A Lightcurve Fit (MCMC Median Parameters)')
-plt.legend()
-plt.grid(True, which='both', ls='--', alpha=0.5)
+ax1.legend(loc='upper right')
+
+ax1.grid(True, which='both', ls='--', alpha=0.5)
 plt.tight_layout()
 plt.savefig('lightcurve_fit_mcmc.png')
 plt.show()

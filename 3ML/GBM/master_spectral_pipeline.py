@@ -73,7 +73,7 @@ print(f"DEC in Degrees: {dec_deg:.6f}")
 # %%
 # ── Edit this block only ────────────────────────────────────────────
 CONFIG = dict(
-    grb_name       = 'GRB200412381',  # catalog key      (with 'GRB' prefix)
+    grb_name       = 'GRB250919020',  # catalog key      (with 'GRB' prefix)
     # Note: trigger_name, ra, and dec will be automatically fetched from the catalog
     # You can optionally define them here to override the catalog defaults!
     #ra=             # in degrees
@@ -83,17 +83,22 @@ CONFIG = dict(
     max_rov        = 60.0,            # keep detectors with ROV < this [deg]
 
     # Analysis Type Selection
-    analysis_type  = 'time_integrated',          # 'time_resolved', 'time_integrated', or 'both'
+    analysis_type  = 'time_resolved',          # 'time_resolved', 'time_integrated', or 'both'
 
     # Time-Integrated settings
-    ti_t_start     = 3.1,             # start of time-integrated window [s relative to trigger]
-    ti_t_stop      = 21.5,            # end of time-integrated window
+    ti_t_start     = [0.0, 99.97, 0.0],             # start of time-integrated window(s) [s relative to trigger] (can be a list)
+    ti_t_stop      = [55.0, 190.02, 190.0],            # end of time-integrated window(s) (can be a list)
 
     # Bayesian-blocks settings (Time-resolved)
     bb_t_start     = -10.0,           # start of BB window [s relative to trigger]
-    bb_t_stop      =  50.0,           # end   of BB window
+    bb_t_stop      =  210.0,           # end   of BB window
     bb_p0          =  0.01,           # false-alarm probability for BB
     min_bin_width  =  0.05,           # seconds; narrower bins are merged away
+
+    # Interval Settings (Auto fetches from catalog, or provide manual strings)
+    # Multiple background intervals are supported! (e.g. '-40.0--10.0, 175.0-210.0')
+    source_interval = '-100.0-300.0',         # 'auto' or e.g., '-5.0-160.0'
+    bkg_interval    = '-100.0--10.0, 200.0-300.0',         # 'auto' or e.g., '-40.0-10.0, 175.0-210.0'
 
     # spectral energy ranges
     nai_range      = '8-33, 37-900',  # keV  (gap skips K-edge ~34-36 keV)
@@ -150,7 +155,8 @@ CONFIG = dict(
     # ──────────────────────────────────────────────────────────────────────────────────────────
     
     # MultiNest settings
-    n_live_points  = 50,             # increase to >=1000 for publication quality
+    n_live_points       = 1000,             # increase to >=1000 for publication quality
+    sampling_efficiency = 0.3,              # 0.8 for parameter estimation, 0.3 for evidence evaluation
 
     # output
     outdir         = 'gbm_pipeline_output',
@@ -286,8 +292,16 @@ log.info('Auto-derived CONFIG -> trigger: %s, ra: %.3f, dec: %.3f',
          CONFIG['trigger_name'], CONFIG['ra'], CONFIG['dec'])
 
 # ── Fetch catalog source / background intervals ───────────────────────
-source_interval     = grb_info['source']['fluence']
-background_interval = grb_info['background']['full']
+if CONFIG.get('source_interval', 'auto') == 'auto':
+    source_interval = grb_info['source']['fluence']
+else:
+    source_interval = CONFIG['source_interval']
+
+if CONFIG.get('bkg_interval', 'auto') == 'auto':
+    background_interval = grb_info['background']['full']
+else:
+    background_interval = CONFIG['bkg_interval']
+
 log.info('Source interval    : %s', source_interval)
 log.info('Background interval: %s', background_interval)
 
@@ -356,7 +370,7 @@ print('Time series built for:', list(time_series.keys()))
 
 # ── Quick sanity: view lightcurve of first NaI ────────────────────────
 first_nai = next(d for d in detectors if d.startswith('n'))
-fig = time_series[first_nai].view_lightcurve(-40, 100)
+fig = time_series[first_nai].view_lightcurve(-40, 250)
 
 fig.savefig(os.path.join(COMMON_PATHS['lc'], f'{first_nai}_raw_lc.png'), dpi=100, bbox_inches='tight')
 plt.close('all')
@@ -481,7 +495,7 @@ if CONFIG['analysis_type'] in ['time_resolved', 'both']:
         # ── Bayesian fit with MultiNest ───────────────────────────────────
         bayes = BayesianAnalysis(model, data_list)
         bayes.set_sampler('multinest')
-        bayes.sampler.setup(n_live_points=CONFIG['n_live_points'])
+        bayes.sampler.setup(n_live_points=CONFIG['n_live_points'], sampling_efficiency=CONFIG['sampling_efficiency'], auto_clean=True)
         bayes.sample()
 
         # ── νFν spectrum plot ─────────────────────────────────────────────
@@ -596,7 +610,7 @@ if CONFIG['analysis_type'] in ['time_resolved', 'both']:
         # ── Bayesian fit with MultiNest ───────────────────────────────────
         bayes = BayesianAnalysis(model, data_list)
         bayes.set_sampler('multinest')
-        bayes.sampler.setup(n_live_points=CONFIG['n_live_points'])
+        bayes.sampler.setup(n_live_points=CONFIG['n_live_points'], sampling_efficiency=CONFIG['sampling_efficiency'], auto_clean=True)
         bayes.sample()
 
         # ── νFν spectrum plot ─────────────────────────────────────────────
@@ -704,7 +718,7 @@ if CONFIG['analysis_type'] in ['time_resolved', 'both']:
 
         bayes = BayesianAnalysis(model, data_list)
         bayes.set_sampler('multinest')
-        bayes.sampler.setup(n_live_points=CONFIG['n_live_points'])
+        bayes.sampler.setup(n_live_points=CONFIG['n_live_points'], sampling_efficiency=CONFIG['sampling_efficiency'], auto_clean=True)
         bayes.sample()
 
         fig_spec = plot_spectra(
@@ -795,7 +809,7 @@ if CONFIG['analysis_type'] in ['time_resolved', 'both']:
 
         bayes = BayesianAnalysis(model, data_list)
         bayes.set_sampler('multinest')
-        bayes.sampler.setup(n_live_points=CONFIG['n_live_points'])
+        bayes.sampler.setup(n_live_points=CONFIG['n_live_points'], sampling_efficiency=CONFIG['sampling_efficiency'], auto_clean=True)
         bayes.sample()
 
         fig_spec = plot_spectra(
@@ -886,7 +900,7 @@ if CONFIG['analysis_type'] in ['time_resolved', 'both']:
 
         bayes = BayesianAnalysis(model, data_list)
         bayes.set_sampler('multinest')
-        bayes.sampler.setup(n_live_points=CONFIG['n_live_points'])
+        bayes.sampler.setup(n_live_points=CONFIG['n_live_points'], sampling_efficiency=CONFIG['sampling_efficiency'], auto_clean=True)
         bayes.sample()
 
         fig_spec = plot_spectra(
@@ -951,92 +965,98 @@ if CONFIG['analysis_type'] in ['time_resolved', 'both']:
 # %%
 if CONFIG['analysis_type'] in ['time_integrated', 'both']:
     log.info('==== Starting Time-Integrated Analysis ====')
+    ti_starts = np.atleast_1d(CONFIG['ti_t_start'])
+    ti_stops  = np.atleast_1d(CONFIG['ti_t_stop'])
     
-    # Define single bin
-    ti_start = np.array([CONFIG['ti_t_start']])
-    ti_stop  = np.array([CONFIG['ti_t_stop']])
-    ti_dt = ti_stop - ti_start
-    
-    ti_plugins = {}
-    for det in detectors:
-        ts = time_series[det]
-        ts.create_time_bins(ti_start, ti_stop, method='custom')
-        ti_plugins[det] = ts.to_spectrumlike(from_bins=True)[0]
+    for ti_s, ti_e in zip(ti_starts, ti_stops):
+        log.info(f'==== Processing Time-Integrated Interval: [{ti_s}, {ti_e}] ====')
         
-    models_to_run = [
-        ('cutoffpl', build_cutoffpl_model, CONFIG['priors_cutoffpl']),
-        ('band', build_band_model, CONFIG['priors_band']),
-        ('bandbb', build_bandbb_model, CONFIG['priors_bandbb']),
-        ('cutoffbb', build_cutoffbb_model, CONFIG['priors_cutoffbb']),
-        ('synchrotron', build_synchrotron_model, CONFIG['priors_synchrotron'])
-    ]
-    
-    for model_name, builder_func, prior_dict in models_to_run:
-        log.info(f'--- Fitting Time-Integrated {model_name.upper()} ---')
-        MODEL_PATHS = get_model_paths(f'ti_{model_name}') 
+        ti_start = np.array([ti_s])
+        ti_stop  = np.array([ti_e])
+        ti_dt = ti_stop - ti_start
         
-        det_plugins = []
+        ti_plugins = {}
         for det in detectors:
-            p = ti_plugins[det]
-            if det.startswith('b'):
-                p.set_active_measurements(CONFIG['bgo_range'])
-            else:
-                ranges = [r.strip() for r in CONFIG['nai_range'].split(',')]
-                p.set_active_measurements(*ranges)
-            det_plugins.append(p)
+            ts = time_series[det]
+            ts.create_time_bins(ti_start, ti_stop, method='custom')
+            ti_plugins[det] = ts.to_spectrumlike(from_bins=True)[0]
             
-        data_list = DataList(*det_plugins)
-        model = builder_func(CONFIG['ra'], CONFIG['dec'], prior_dict)
+        models_to_run = [
+            ('cutoffpl', build_cutoffpl_model, CONFIG['priors_cutoffpl']),
+            ('band', build_band_model, CONFIG['priors_band']),
+            ('bandbb', build_bandbb_model, CONFIG['priors_bandbb']),
+            ('cutoffbb', build_cutoffbb_model, CONFIG['priors_cutoffbb']),
+            ('synchrotron', build_synchrotron_model, CONFIG['priors_synchrotron'])
+        ]
         
-        bayes = BayesianAnalysis(model, data_list)
-        bayes.set_sampler('multinest')
-        bayes.sampler.setup(n_live_points=CONFIG['n_live_points'])
-        bayes.sample()
-        
-        fig_spec = plot_spectra(
-            bayes.results,
-            ene_min=1.0, ene_max=1e5, num_ene=200,
-            contour_colors='white', contour_style_kwargs=dict(alpha=0.2),
-            use_components=True, components_to_use=['total'],
-            flux_unit='keV2/(cm2 s keV)',
-        )
-        ax = plt.gca()
-        ax.set_xlabel('Energy (keV)', fontsize=16)
-        ax.set_ylabel(r'$\nu\,F_\nu\;[\mathrm{keV\,cm^{-2}\,s^{-1}}]$', fontsize=16)
-        ax.set_title(f"{CONFIG['trigger_name']} Time-Integrated [{ti_start[0]:.3f}, {ti_stop[0]:.3f}] s", fontsize=13)
-        fig_spec.savefig(os.path.join(MODEL_PATHS['spectra'], f'{model_name}_ti_spec.png'), dpi=120, bbox_inches='tight')
-        plt.close('all')
-        
-        fig_corner = bayes.results.corner_plot()
-        fig_corner.savefig(os.path.join(MODEL_PATHS['corners'], f'{model_name}_ti_corner.png'), dpi=100, bbox_inches='tight')
-        plt.close('all')
-        
-        flux_df = bayes.results.get_point_source_flux(10 * u.keV, 10 * u.MeV)
-        f_val = flux_df['flux'].iloc[0].value
-        f_low = flux_df['low bound'].iloc[0].value
-        f_hi  = flux_df['hi bound'].iloc[0].value
-        
-        df = bayes.results.get_data_frame('equal tail')
-        df = df.drop('unit', axis=1, errors='ignore')
-        param_array = df.to_numpy().flatten()
-        
-        import pandas as pd
-        param_names = df.index.tolist()
-        columns = []
-        for p in param_names:
-            columns.extend([p, f'{p}_n_err', f'{p}_p_err', f'{p}_avg_err'])
-        columns.extend(['flux', 'flux_low', 'flux_hi', 't_start', 't_stop', 'dt', 'DIC', 'PDIC', 'BIC'])
-        
-        stat_df = bayes.results.get_statistic_measure_frame()
-        dic_val = stat_df.loc['DIC'].iloc[0] if 'DIC' in stat_df.index else np.nan
-        pdic_val = stat_df.loc['PDIC'].iloc[0] if 'PDIC' in stat_df.index else np.nan
-        bic_val = stat_df.loc['BIC'].iloc[0] if 'BIC' in stat_df.index else np.nan
-
-        full_row = np.append(param_array, [f_val, f_low, f_hi, ti_start[0], ti_stop[0], ti_dt[0], dic_val, pdic_val, bic_val])
-        ti_table = Table(rows=[full_row], names=columns)
-        csv_path = os.path.join(MODEL_PATHS['root'], 'ti_fit_params.csv')
-        ti_table.write(csv_path, overwrite=True)
-        log.info(f'  Saved Time-Integrated {model_name} results to {csv_path}')
+        for model_name, builder_func, prior_dict in models_to_run:
+            log.info(f'--- Fitting Time-Integrated {model_name.upper()} for [{ti_s}, {ti_e}] ---')
+            MODEL_PATHS = get_model_paths(f'ti_{model_name}') 
+            
+            det_plugins = []
+            for det in detectors:
+                p = ti_plugins[det]
+                if det.startswith('b'):
+                    p.set_active_measurements(CONFIG['bgo_range'])
+                else:
+                    ranges = [r.strip() for r in CONFIG['nai_range'].split(',')]
+                    p.set_active_measurements(*ranges)
+                det_plugins.append(p)
+                
+            data_list = DataList(*det_plugins)
+            model = builder_func(CONFIG['ra'], CONFIG['dec'], prior_dict)
+            
+            bayes = BayesianAnalysis(model, data_list)
+            bayes.set_sampler('multinest')
+            bayes.sampler.setup(n_live_points=CONFIG['n_live_points'], sampling_efficiency=CONFIG['sampling_efficiency'], auto_clean=True)
+            bayes.sample()
+            
+            fig_spec = plot_spectra(
+                bayes.results,
+                ene_min=1.0, ene_max=1e5, num_ene=200,
+                contour_colors='white', contour_style_kwargs=dict(alpha=0.2),
+                use_components=True, components_to_use=['total'],
+                flux_unit='keV2/(cm2 s keV)',
+            )
+            ax = plt.gca()
+            ax.set_xlabel('Energy (keV)', fontsize=16)
+            ax.set_ylabel(r'$\nu\,F_\nu\;[\mathrm{keV\,cm^{-2}\,s^{-1}}]$', fontsize=16)
+            ax.set_title(f"{CONFIG['trigger_name']} Time-Integrated [{ti_start[0]:.3f}, {ti_stop[0]:.3f}] s", fontsize=13)
+            interval_str = f"{ti_start[0]}_{ti_stop[0]}"
+            fig_spec.savefig(os.path.join(MODEL_PATHS['spectra'], f'{model_name}_timeint_{interval_str}_spec.png'), dpi=120, bbox_inches='tight')
+            plt.close('all')
+            
+            fig_corner = bayes.results.corner_plot()
+            fig_corner.savefig(os.path.join(MODEL_PATHS['corners'], f'{model_name}_timeint_{interval_str}_corner.png'), dpi=100, bbox_inches='tight')
+            plt.close('all')
+            
+            flux_df = bayes.results.get_point_source_flux(10 * u.keV, 10 * u.MeV)
+            f_val = flux_df['flux'].iloc[0].value
+            f_low = flux_df['low bound'].iloc[0].value
+            f_hi  = flux_df['hi bound'].iloc[0].value
+            
+            df = bayes.results.get_data_frame('equal tail')
+            df = df.drop('unit', axis=1, errors='ignore')
+            param_array = df.to_numpy().flatten()
+            
+            import pandas as pd
+            param_names = df.index.tolist()
+            columns = []
+            for p in param_names:
+                columns.extend([p, f'{p}_n_err', f'{p}_p_err', f'{p}_avg_err'])
+            columns.extend(['flux', 'flux_low', 'flux_hi', 't_start', 't_stop', 'dt', 'DIC', 'PDIC', 'BIC'])
+            
+            stat_df = bayes.results.get_statistic_measure_frame()
+            dic_val = stat_df.loc['DIC'].iloc[0] if 'DIC' in stat_df.index else np.nan
+            pdic_val = stat_df.loc['PDIC'].iloc[0] if 'PDIC' in stat_df.index else np.nan
+            bic_val = stat_df.loc['BIC'].iloc[0] if 'BIC' in stat_df.index else np.nan
+    
+            full_row = np.append(param_array, [f_val, f_low, f_hi, ti_start[0], ti_stop[0], ti_dt[0], dic_val, pdic_val, bic_val])
+            ti_table = Table(rows=[full_row], names=columns)
+            interval_str = f"{ti_start[0]}_{ti_stop[0]}"
+            csv_path = os.path.join(MODEL_PATHS['root'], f'timeint_{interval_str}_fit_params.csv')
+            ti_table.write(csv_path, overwrite=True)
+            log.info(f'  Saved Time-Integrated {model_name} results to {csv_path}')
 
 
 # %% [markdown]
@@ -1077,9 +1097,11 @@ if os.path.exists(COMMON_PATHS['root']):
             else:
                 print(f'    TR CSV results : (Not generated)')
             
-            ti_csv_file = os.path.join(model_dir, 'ti_fit_params.csv')
-            if os.path.exists(ti_csv_file):
-                print(f'    TI CSV results : {ti_csv_file}')
+            import glob
+            ti_csv_files = glob.glob(os.path.join(model_dir, 'timeint_*_fit_params.csv'))
+            ti_csv_files += glob.glob(os.path.join(model_dir, 'ti_fit_params.csv'))
+            for tf in ti_csv_files:
+                print(f'    TI CSV results : {tf}')
             print()
 
 if not found_models:
